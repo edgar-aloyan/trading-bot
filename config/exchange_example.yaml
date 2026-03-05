@@ -1,0 +1,8 @@
+# Скопируй в exchange.yaml и подставь свои ключи
+# exchange.yaml в .gitignore — не коммитится!
+
+exchange:
+  name: bybit
+  testnet: true
+  api_key: "YOUR_API_KEY"
+  api_secret: "YOUR_API_SECRET"

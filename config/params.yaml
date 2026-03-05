@@ -1,0 +1,53 @@
+# Все параметры системы — единый источник истины
+# Никаких магических чисел в коде!
+
+market_data:
+  symbol: "BTC/USDT"
+  leader_symbols:
+    - "ETH/USDT"
+  perpetual_symbol: "BTC/USDT:USDT"
+  orderbook_depth: 50
+  trade_buffer_seconds: 60  # сколько секунд хранить историю сделок
+  reconnect_delay_seconds: 5
+  max_reconnect_attempts: 10
+
+signals:
+  orderbook_levels: 10  # топ N уровней для imbalance
+  imbalance_threshold: 0.65
+  flow_threshold: 1.5
+  flow_window_seconds: 5
+  eth_window_seconds: 10
+  eth_move_threshold: 0.0003  # 0.03%
+  funding_positive_threshold: 0.0001
+  funding_negative_threshold: -0.0001
+
+filters:
+  max_spread_usd: 2.0
+  min_volatility: 0.0001
+  max_volatility: 0.01
+  volatility_window_seconds: 60
+
+evolution:
+  population_size: 20
+  evolution_trigger_trades: 100
+  elite_ratio: 0.3
+  crossover_ratio: 0.4
+  mutation_ratio: 0.3
+  mutation_rate: 0.2
+  mutation_strength: 0.1
+
+fitness:
+  winrate_weight: 0.30
+  profit_factor_weight: 0.30
+  sharpe_weight: 0.20
+  drawdown_weight: 0.20
+
+paper_trading:
+  initial_balance_usd: 10000
+  maker_fee: 0.0001  # 0.01%
+  taker_fee: 0.0006  # 0.06%
+  slippage_factor: 0.5  # slippage = factor * spread
+
+voting:
+  threshold_long: 0.65
+  threshold_short: 0.35
