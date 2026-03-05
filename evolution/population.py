@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from core.decision import BotParams, DecisionEngine
+from core.decision import BotParams, DecisionEngine, FilterConfig
 from core.signals import Signal, SignalValues
 from evolution.fitness import (
     FitnessConfig,
@@ -23,6 +23,20 @@ from paper.simulator import PaperExecutor, PaperTradingConfig
 # ---------------------------------------------------------------------------
 # Bot — один участник популяции
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedTrade:
+    """Информация о закрытой сделке — для логирования в main.py."""
+
+    bot_id: int
+    generation: int
+    side: str
+    entry_price: float
+    exit_price: float
+    pnl: float
+    entry_time: float
+    exit_time: float
 
 
 @dataclass(slots=True)
@@ -56,10 +70,12 @@ class Population:
         fitness_config: FitnessConfig,
         genetics_config: GeneticsConfig,
         evolution_trigger_trades: int,
+        filter_config: FilterConfig,
     ) -> None:
         self._paper_config = paper_config
         self._fitness_config = fitness_config
         self._genetics_config = genetics_config
+        self._filter_config = filter_config
         self._evolution_trigger = evolution_trigger_trades
         self._generation = 0
         self._total_trades = 0
@@ -75,7 +91,7 @@ class Population:
                 Bot(
                     bot_id=i,
                     params=params,
-                    engine=DecisionEngine(params),
+                    engine=DecisionEngine(params, self._filter_config),
                     executor=PaperExecutor(self._paper_config),
                     generation=self._generation,
                 )
@@ -85,7 +101,11 @@ class Population:
     def process_signals(
         self, values: SignalValues, current_price: float, spread: float, now: float
     ) -> list[tuple[int, Signal]]:
-        """Обрабатывает сигналы для всех ботов. Возвращает (bot_id, signal)."""
+        """Обрабатывает сигналы для всех ботов. Возвращает (bot_id, signal).
+
+        Закрытые сделки доступны через self.last_closed_trades.
+        """
+        self.last_closed_trades: list[ClosedTrade] = []
         results: list[tuple[int, Signal]] = []
 
         for bot in self.bots:
@@ -116,7 +136,7 @@ class Population:
                 Bot(
                     bot_id=i,
                     params=params,
-                    engine=DecisionEngine(params),
+                    engine=DecisionEngine(params, self._filter_config),
                     executor=PaperExecutor(self._paper_config),
                     generation=self._generation,
                 )
@@ -146,12 +166,22 @@ class Population:
 
         # Проверяем выход из позиции
         if engine.position is not None and engine.should_exit(current_price, now):
-            entry_time = engine.position.entry_time
+            pos = engine.position
             pnl = engine.close_position(current_price)
             bot.executor.apply_pnl(pnl)
             bot.trades.append(TradeRecord(
                 pnl=pnl,
-                entry_time=entry_time,
+                entry_time=pos.entry_time,
+                exit_time=now,
+            ))
+            self.last_closed_trades.append(ClosedTrade(
+                bot_id=bot.bot_id,
+                generation=bot.generation,
+                side=pos.side.value,
+                entry_price=pos.entry_price,
+                exit_price=current_price,
+                pnl=pnl,
+                entry_time=pos.entry_time,
                 exit_time=now,
             ))
             self._total_trades += 1
@@ -161,7 +191,10 @@ class Population:
         if engine.position is None:
             signal = engine.compute_entry_signal(values, current_price, now)
             if signal != Signal.HOLD:
-                engine.open_position(signal, current_price, now, size_usd=1000.0)
+                engine.open_position(
+                    signal, current_price, now,
+                    size_usd=self._paper_config.position_size_usd,
+                )
             return signal
 
         return Signal.HOLD

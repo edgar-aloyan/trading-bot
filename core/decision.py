@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import yaml
+
 from core.signals import Signal, SignalValues
 
 # ---------------------------------------------------------------------------
@@ -28,6 +30,31 @@ class BotParams:
     eth_window_seconds: float  # окно для lead-lag ETH (5–30)
     eth_move_threshold: float  # порог движения ETH (0.01%–0.05%)
     leader_weight: float  # вес поводырей (0.0–1.0)
+
+
+# ---------------------------------------------------------------------------
+# Filter config — общие пороги, не эволюционируют
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class FilterConfig:
+    """Пороги фильтров из params.yaml — одинаковые для всех ботов."""
+
+    max_spread_usd: float
+    min_volatility: float
+    max_volatility: float
+
+    @staticmethod
+    def from_yaml(path: str) -> FilterConfig:
+        with open(path) as f:
+            raw = yaml.safe_load(f)
+        flt = raw["filters"]
+        return FilterConfig(
+            max_spread_usd=flt["max_spread_usd"],
+            min_volatility=flt["min_volatility"],
+            max_volatility=flt["max_volatility"],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +84,9 @@ class DecisionEngine:
     С позицией: проверяет TP/SL/timeout → нужно ли закрывать.
     """
 
-    def __init__(self, params: BotParams) -> None:
+    def __init__(self, params: BotParams, filters: FilterConfig) -> None:
         self.params = params
+        self.filters = filters
         self.position: Position | None = None
 
     def compute_entry_signal(
@@ -115,12 +143,16 @@ class DecisionEngine:
     # ----- internal -----
 
     def _pass_filters(self, values: SignalValues) -> bool:
-        """Фильтры, блокирующие вход — спред и funding rate."""
-        # Funding rate как осторожность: сильный перегрев → не входим
-        params = self.params
-        if values.funding_rate > 0 and values.funding_rate > params.eth_move_threshold:
-            return True  # не блокируем, но funding учитывается в score
-        return True
+        """Фильтры по SPEC.md — не торговать когда рынок непригоден."""
+        f = self.filters
+        # Спред слишком широкий — ликвидности нет
+        if values.spread > f.max_spread_usd:
+            return False
+        # Боковик — волатильности не хватает для скальпинга
+        if 0 < values.volatility < f.min_volatility:
+            return False
+        # Хаос — слишком высокая волатильность
+        return values.volatility <= f.max_volatility
 
     def _compute_score(self, values: SignalValues) -> float:
         """Вычисляет композитный score для направления сделки.

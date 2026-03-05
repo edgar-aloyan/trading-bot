@@ -16,13 +16,19 @@ import signal
 import time
 from dataclasses import asdict
 
+from core.decision import FilterConfig
 from core.market_data import MarketDataConfig, MarketDataStream, MarketSnapshot
 from core.signals import SignalComputer, SignalsConfig
 from ensemble.voting import VotingConfig, compute_vote
 from evolution.fitness import FitnessConfig, compute_fitness
 from evolution.genetics import GeneticsConfig
 from evolution.population import Population
-from monitoring.logger import EvolutionEvent, StructuredLogger, SystemEvent
+from monitoring.logger import (
+    EvolutionEvent,
+    StructuredLogger,
+    SystemEvent,
+    TradeEvent,
+)
 from paper.simulator import PaperTradingConfig
 
 CONFIG_PATH = "config/params.yaml"
@@ -41,6 +47,7 @@ class TradingBot:
         self._fitness_config = FitnessConfig.from_yaml(config_path)
         self._genetics_config = GeneticsConfig.from_yaml(config_path)
         self._paper_config = PaperTradingConfig.from_yaml(config_path)
+        self._filter_config = FilterConfig.from_yaml(config_path)
 
         # Читаем evolution params напрямую
         import yaml
@@ -60,6 +67,7 @@ class TradingBot:
             fitness_config=self._fitness_config,
             genetics_config=self._genetics_config,
             evolution_trigger_trades=trigger,
+            filter_config=self._filter_config,
         )
         self._logger = StructuredLogger()
         self._running = False
@@ -99,6 +107,18 @@ class TradingBot:
         if not self._running:
             return
 
+        try:
+            self._process_snapshot(snapshot)
+        except Exception as exc:
+            self._logger.log_system(SystemEvent(
+                event="processing_error",
+                timestamp=time.time(),
+                message=f"Error in on_market_update: {exc}",
+                details={"type": type(exc).__name__},
+            ))
+
+    def _process_snapshot(self, snapshot: MarketSnapshot) -> None:
+        """Обработка одного снапшота — вынесена для try/except."""
         now = snapshot.timestamp or time.time()
 
         # 1. Вычисляем сырые сигналы
@@ -114,10 +134,35 @@ class TradingBot:
             values, current_price, spread, now
         )
 
-        # 3. Голосование
+        # 3. Логируем закрытые сделки
+        for ct in self._population.last_closed_trades:
+            bot = self._population.bots[ct.bot_id]
+            self._logger.log_trade(TradeEvent(
+                event="trade_closed",
+                timestamp=now,
+                bot_id=ct.bot_id,
+                generation=ct.generation,
+                params={
+                    k: getattr(bot.params, k)
+                    for k in [
+                        "imbalance_threshold", "flow_threshold",
+                        "take_profit_usd", "stop_loss_usd",
+                    ]
+                },
+                signals=asdict(values),
+                trade={
+                    "side": ct.side,
+                    "entry_price": ct.entry_price,
+                    "exit_price": ct.exit_price,
+                    "pnl": ct.pnl,
+                    "hold_seconds": ct.exit_time - ct.entry_time,
+                },
+            ))
+
+        # 4. Голосование
         vote = compute_vote(bot_signals, self._voting_config)
 
-        # 4. Логируем если есть сигнал
+        # 5. Логируем если есть сигнал
         if vote.signal.value != "HOLD":
             self._logger.log_raw({
                 "event": "ensemble_signal",
@@ -131,7 +176,7 @@ class TradingBot:
                 "signals": asdict(values),
             })
 
-        # 5. Эволюция если пора
+        # 6. Эволюция если пора
         if self._population.should_evolve():
             self._run_evolution(now)
 
