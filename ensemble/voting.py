@@ -21,8 +21,8 @@ from core.signals import Signal
 class VotingConfig:
     """Пороги голосования из params.yaml."""
 
-    threshold_long: float  # доля LONG голосов для итогового LONG
-    threshold_short: float  # доля SHORT голосов ниже которой → SHORT
+    threshold_long: float  # доля LONG голосов для итогового LONG (0.65 = 65%)
+    threshold_short: float  # доля SHORT голосов для итогового SHORT (0.65 = 65%)
 
     @staticmethod
     def from_yaml(path: str) -> VotingConfig:
@@ -79,7 +79,7 @@ def compute_vote(
     if long_ratio >= config.threshold_long:
         signal = Signal.LONG
         confidence = long_ratio
-    elif short_ratio >= (1 - config.threshold_short):
+    elif short_ratio >= config.threshold_short:
         signal = Signal.SHORT
         confidence = short_ratio
     else:

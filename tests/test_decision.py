@@ -21,8 +21,6 @@ def _default_params() -> BotParams:
         take_profit_usd=20.0,
         stop_loss_usd=10.0,
         max_hold_seconds=60.0,
-        flow_window_seconds=5.0,
-        eth_window_seconds=10.0,
         eth_move_threshold=0.0003,
         leader_weight=0.5,
     )

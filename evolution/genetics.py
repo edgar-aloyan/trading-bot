@@ -31,8 +31,6 @@ PARAM_RANGES: dict[str, ParamRange] = {
     "take_profit_usd": ParamRange(8.0, 40.0),
     "stop_loss_usd": ParamRange(5.0, 25.0),
     "max_hold_seconds": ParamRange(10.0, 120.0),
-    "flow_window_seconds": ParamRange(3.0, 15.0),
-    "eth_window_seconds": ParamRange(5.0, 30.0),
     "eth_move_threshold": ParamRange(0.0001, 0.0005),
     "leader_weight": ParamRange(0.0, 1.0),
 }

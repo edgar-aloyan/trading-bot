@@ -7,7 +7,7 @@ from ensemble.voting import VotingConfig, compute_vote
 
 
 def _default_config() -> VotingConfig:
-    return VotingConfig(threshold_long=0.65, threshold_short=0.35)
+    return VotingConfig(threshold_long=0.65, threshold_short=0.65)
 
 
 class TestComputeVote:
@@ -46,7 +46,7 @@ class TestComputeVote:
 
     def test_exact_threshold_long(self) -> None:
         """Ровно на пороге — должен быть LONG."""
-        config = VotingConfig(threshold_long=0.60, threshold_short=0.40)
+        config = VotingConfig(threshold_long=0.60, threshold_short=0.60)
         signals = [(i, Signal.LONG) for i in range(6)]
         signals += [(i + 6, Signal.HOLD) for i in range(4)]
         result = compute_vote(signals, config)

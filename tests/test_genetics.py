@@ -30,8 +30,6 @@ def _fixed_params() -> BotParams:
         take_profit_usd=20.0,
         stop_loss_usd=10.0,
         max_hold_seconds=60.0,
-        flow_window_seconds=5.0,
-        eth_window_seconds=10.0,
         eth_move_threshold=0.0003,
         leader_weight=0.5,
     )
@@ -54,8 +52,6 @@ class TestCrossover:
             take_profit_usd=10.0,
             stop_loss_usd=5.0,
             max_hold_seconds=30.0,
-            flow_window_seconds=4.0,
-            eth_window_seconds=6.0,
             eth_move_threshold=0.0002,
             leader_weight=0.2,
         )
@@ -65,8 +61,6 @@ class TestCrossover:
             take_profit_usd=30.0,
             stop_loss_usd=15.0,
             max_hold_seconds=90.0,
-            flow_window_seconds=10.0,
-            eth_window_seconds=20.0,
             eth_move_threshold=0.0004,
             leader_weight=0.8,
         )

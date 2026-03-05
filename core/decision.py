@@ -26,8 +26,6 @@ class BotParams:
     take_profit_usd: float  # тейк-профит ($8–$40)
     stop_loss_usd: float  # стоп-лосс ($5–$25)
     max_hold_seconds: float  # макс. время удержания (10–120)
-    flow_window_seconds: float  # окно для trade flow (3–15)
-    eth_window_seconds: float  # окно для lead-lag ETH (5–30)
     eth_move_threshold: float  # порог движения ETH (0.01%–0.05%)
     leader_weight: float  # вес поводырей (0.0–1.0)
 

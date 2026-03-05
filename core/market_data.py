@@ -12,12 +12,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -189,13 +192,20 @@ class MarketDataStream:
         self._exchange = ccxtpro.bybit({"enableRateLimit": True})
         self._running = True
 
-        try:
-            await asyncio.gather(
-                self._watch_order_book(self._config.symbol, is_leader=False),
-                self._watch_trades(self._config.symbol),
-                self._watch_order_book(self._config.leader_symbols[0], is_leader=True),
-                self._watch_ticker(self._config.perpetual_symbol),
+        tasks = [
+            self._watch_order_book(self._config.symbol, is_leader=False),
+            self._watch_trades(self._config.symbol),
+            self._watch_ticker(self._config.perpetual_symbol),
+        ]
+        if self._config.leader_symbols:
+            tasks.append(
+                self._watch_order_book(self._config.leader_symbols[0], is_leader=True)
             )
+        else:
+            logger.warning("No leader symbols configured, ETH lead-lag disabled")
+
+        try:
+            await asyncio.gather(*tasks)
         finally:
             await self.stop()
 
@@ -210,6 +220,7 @@ class MarketDataStream:
     async def _watch_order_book(self, symbol: str, *, is_leader: bool) -> None:
         assert self._exchange is not None
         exchange = self._exchange
+        failures = 0
         while self._running:
             try:
                 ob = await exchange.watch_order_book(
@@ -221,14 +232,24 @@ class MarketDataStream:
                 else:
                     self._btc_book = book
                 await self._notify()
-            except Exception:
+                failures = 0
+            except Exception as exc:
                 if not self._running:
                     break
+                failures += 1
+                logger.warning(
+                    "watch_order_book %s failed (%d/%d): %s",
+                    symbol, failures, self._config.max_reconnect_attempts, exc,
+                )
+                if failures >= self._config.max_reconnect_attempts:
+                    logger.error("Max reconnects reached for order_book %s", symbol)
+                    raise
                 await asyncio.sleep(self._config.reconnect_delay_seconds)
 
     async def _watch_trades(self, symbol: str) -> None:
         assert self._exchange is not None
         exchange = self._exchange
+        failures = 0
         while self._running:
             try:
                 trades_raw = await exchange.watch_trades(symbol)
@@ -242,14 +263,24 @@ class MarketDataStream:
                     self._trades.append(trade)
                 self._prune_old_trades()
                 await self._notify()
-            except Exception:
+                failures = 0
+            except Exception as exc:
                 if not self._running:
                     break
+                failures += 1
+                logger.warning(
+                    "watch_trades %s failed (%d/%d): %s",
+                    symbol, failures, self._config.max_reconnect_attempts, exc,
+                )
+                if failures >= self._config.max_reconnect_attempts:
+                    logger.error("Max reconnects reached for trades %s", symbol)
+                    raise
                 await asyncio.sleep(self._config.reconnect_delay_seconds)
 
     async def _watch_ticker(self, symbol: str) -> None:
         assert self._exchange is not None
         exchange = self._exchange
+        failures = 0
         while self._running:
             try:
                 ticker = await exchange.watch_ticker(symbol)
@@ -260,9 +291,18 @@ class MarketDataStream:
                     timestamp=time.time(),
                 )
                 await self._notify()
-            except Exception:
+                failures = 0
+            except Exception as exc:
                 if not self._running:
                     break
+                failures += 1
+                logger.warning(
+                    "watch_ticker %s failed (%d/%d): %s",
+                    symbol, failures, self._config.max_reconnect_attempts, exc,
+                )
+                if failures >= self._config.max_reconnect_attempts:
+                    logger.error("Max reconnects reached for ticker %s", symbol)
+                    raise
                 await asyncio.sleep(self._config.reconnect_delay_seconds)
 
     # ----- helpers -----
