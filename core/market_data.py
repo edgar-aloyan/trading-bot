@@ -187,7 +187,7 @@ class MarketDataStream:
     async def start(self) -> None:
         """Запуск потоков данных. Блокирует до вызова stop()."""
         # Ленивый импорт ccxt — чтобы тесты работали без установленной биржи
-        import ccxt.pro as ccxtpro  # type: ignore[import-not-found]
+        import ccxt.pro as ccxtpro
 
         self._exchange = ccxtpro.bybit({"enableRateLimit": True})
         self._running = True
