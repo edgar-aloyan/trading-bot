@@ -148,8 +148,8 @@ class DecisionEngine:
         # Спред слишком широкий — ликвидности нет
         if values.spread > f.max_spread_usd:
             return False
-        # Боковик — волатильности не хватает для скальпинга
-        if 0 < values.volatility < f.min_volatility:
+        # Боковик или нет данных — волатильности не хватает для скальпинга
+        if values.volatility < f.min_volatility:
             return False
         # Хаос — слишком высокая волатильность
         return values.volatility <= f.max_volatility

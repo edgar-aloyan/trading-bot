@@ -184,6 +184,12 @@ class TestFilters:
         values = self._long_values(volatility=0.02)
         assert engine.compute_entry_signal(values, 67000.0, 1.0) == Signal.HOLD
 
+    def test_zero_volatility_blocks_entry(self) -> None:
+        engine = DecisionEngine(_default_params(), _default_filters())
+        # volatility = 0 — нет данных на старте, не торговать
+        values = self._long_values(volatility=0.0)
+        assert engine.compute_entry_signal(values, 67000.0, 1.0) == Signal.HOLD
+
     def test_normal_conditions_pass(self) -> None:
         engine = DecisionEngine(_default_params(), _default_filters())
         # Всё в пределах нормы — сигнал должен пройти

@@ -95,6 +95,12 @@ class TestComputeTradeFlow:
         # Нет продаж — возвращаем объём покупок
         assert compute_trade_flow(trades, window_seconds=5, now=now) == 5.0
 
+    def test_only_buys_capped(self) -> None:
+        """При отсутствии продаж — cap на 10.0 чтобы не раздувать score."""
+        now = time.time()
+        trades = [Trade(100.0, 50.0, "buy", now - 1)]
+        assert compute_trade_flow(trades, window_seconds=5, now=now) == 10.0
+
     def test_old_trades_excluded(self) -> None:
         """Сделки старше окна не учитываются."""
         now = time.time()

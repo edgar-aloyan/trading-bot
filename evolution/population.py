@@ -79,6 +79,7 @@ class Population:
         self._evolution_trigger = evolution_trigger_trades
         self._generation = 0
         self._total_trades = 0
+        self.last_closed_trades: list[ClosedTrade] = []
 
         self.bots = self._create_bots(size)
 
@@ -105,7 +106,7 @@ class Population:
 
         Закрытые сделки доступны через self.last_closed_trades.
         """
-        self.last_closed_trades: list[ClosedTrade] = []
+        self.last_closed_trades = []
         results: list[tuple[int, Signal]] = []
 
         for bot in self.bots:

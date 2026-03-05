@@ -229,6 +229,6 @@ def compute_trade_flow(
         else:
             sell_vol += t.volume
     if sell_vol == 0:
-        # Нет продаж — если есть покупки, возвращаем их объём как ratio
-        return buy_vol if buy_vol > 0 else 1.0
+        # Нет продаж — ограничиваем сверху чтобы не раздувать score
+        return min(buy_vol, 10.0) if buy_vol > 0 else 1.0
     return buy_vol / sell_vol
