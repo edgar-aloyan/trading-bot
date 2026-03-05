@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
 
 COPY . .
 
-# Проверяем что код проходит линтеры при сборке
-RUN ruff check . && mypy --strict .
+# Проверяем что код проходит линтеры и тесты при сборке
+RUN ruff check . && mypy --strict . && pytest tests/ -q
 
 CMD ["python", "main.py"]
