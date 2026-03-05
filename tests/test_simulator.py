@@ -11,6 +11,7 @@ from paper.simulator import PaperExecutor, PaperTradingConfig
 def _default_config() -> PaperTradingConfig:
     return PaperTradingConfig(
         initial_balance_usd=10000.0,
+        position_size_usd=1000.0,
         maker_fee=0.0001,
         taker_fee=0.0006,
         slippage_factor=0.5,
@@ -91,6 +92,7 @@ class TestPaperExecutor:
             """
 paper_trading:
   initial_balance_usd: 10000
+  position_size_usd: 1000
   maker_fee: 0.0001
   taker_fee: 0.0006
   slippage_factor: 0.5

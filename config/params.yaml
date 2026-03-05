@@ -44,6 +44,7 @@ fitness:
 
 paper_trading:
   initial_balance_usd: 10000
+  position_size_usd: 1000  # размер одной позиции
   maker_fee: 0.0001  # 0.01%
   taker_fee: 0.0006  # 0.06%
   slippage_factor: 0.5  # slippage = factor * spread
