@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    container_name: trading-bot
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    env_file:
+      - .env
