@@ -1,4 +1,4 @@
-"""Тесты для main.py — end-to-end без реального WebSocket."""
+"""Тесты для main.py — end-to-end без WebSocket и PostgreSQL."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from core.market_data import (
     Trade,
 )
 from main import TradingBot
+from tests.mock_db import MockStateDB
 
 
 def _make_snapshot(
@@ -37,27 +38,32 @@ def _make_snapshot(
     )
 
 
+async def _make_bot() -> TradingBot:
+    db = MockStateDB()
+    bot = TradingBot(db, "config/params.yaml")
+    # Инициализируем популяцию вручную (обычно это делает start())
+    await bot._init_population()
+    bot._running = True
+    return bot
+
+
 class TestTradingBot:
-    def test_creation(self) -> None:
-        bot = TradingBot("config/params.yaml")
+    @pytest.mark.asyncio
+    async def test_creation(self) -> None:
+        bot = await _make_bot()
+        assert bot._population is not None
         assert len(bot._population.bots) == 20
         assert bot._population.generation == 0
 
     @pytest.mark.asyncio
-    async def test_on_market_update(self, tmp_path: object) -> None:
-        bot = TradingBot("config/params.yaml")
-        bot._running = True
-
-        # Один тик — не должен падать
+    async def test_on_market_update(self) -> None:
+        bot = await _make_bot()
         snap = _make_snapshot()
         await bot.on_market_update(snap)
 
     @pytest.mark.asyncio
-    async def test_multiple_updates(self, tmp_path: object) -> None:
-        bot = TradingBot("config/params.yaml")
-        bot._running = True
-
-        # Несколько тиков с разными ценами
+    async def test_multiple_updates(self) -> None:
+        bot = await _make_bot()
         for i in range(10):
             snap = _make_snapshot(
                 btc_mid=67000.0 + i * 10,
@@ -67,15 +73,12 @@ class TestTradingBot:
 
     @pytest.mark.asyncio
     async def test_not_running_skips(self) -> None:
-        bot = TradingBot("config/params.yaml")
+        bot = await _make_bot()
         bot._running = False
-        # Не должно ничего делать
         await bot.on_market_update(_make_snapshot())
 
     @pytest.mark.asyncio
     async def test_zero_price_skips(self) -> None:
-        bot = TradingBot("config/params.yaml")
-        bot._running = True
-        # Пустой стакан — mid_price = 0
+        bot = await _make_bot()
         snap = MarketSnapshot(timestamp=1000.0)
         await bot.on_market_update(snap)

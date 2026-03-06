@@ -1,33 +1,49 @@
 """Управление популяцией ботов — создание, эволюция, отслеживание.
 
-Каждый бот — это DecisionEngine + PaperExecutor + история сделок.
-Population связывает все части и управляет жизненным циклом.
+Stateless: всё состояние в PostgreSQL (StateDB).
+В памяти только кэш для быстрого tick processing (позиции, params, balance).
+При каждом изменении состояния — запись в DB из main.py.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 
-from core.decision import BotParams, DecisionEngine, FilterConfig
+from core.decision import BotParams, DecisionEngine, FilterConfig, Position
 from core.signals import Signal, SignalValues
-from evolution.fitness import (
-    FitnessConfig,
-    FitnessMetrics,
-    TradeRecord,
-    compute_fitness,
-    compute_metrics,
-)
+from evolution.fitness import FitnessConfig, TradeRecord, compute_fitness, compute_metrics
 from evolution.genetics import GeneticsConfig, evolve, random_params
-from paper.simulator import PaperExecutor, PaperTradingConfig
+from paper.simulator import PaperTradingConfig
+from storage.database import BotRow, StateDBProtocol
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Bot — один участник популяции
+# Bot — in-memory кэш для быстрого tick processing
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class Bot:
+    """Один бот: параметры + движок (кэш позиции) + кэш баланса."""
+
+    bot_id: int
+    params: BotParams
+    engine: DecisionEngine
+    generation: int = 0
+    balance: float = 0.0
+    entry_signals: dict[str, object] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Events — результаты tick processing для записи в DB
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class ClosedTrade:
-    """Информация о закрытой сделке — для логирования в main.py."""
+    """Закрытая сделка — для записи в DB."""
 
     bot_id: int
     generation: int
@@ -35,33 +51,38 @@ class ClosedTrade:
     entry_price: float
     exit_price: float
     pnl: float
+    fees: float
     entry_time: float
     exit_time: float
+    entry_signals: dict[str, object] | None
+    exit_signals: dict[str, object] | None
 
 
-@dataclass(slots=True)
-class Bot:
-    """Один бот в популяции: параметры + движок + баланс + история."""
+@dataclass(frozen=True, slots=True)
+class OpenedPosition:
+    """Открытая позиция — для записи в DB."""
 
     bot_id: int
-    params: BotParams
-    engine: DecisionEngine
-    executor: PaperExecutor
-    trades: list[TradeRecord] = field(default_factory=list)
-    generation: int = 0
-
-    @property
-    def fitness_metrics(self) -> FitnessMetrics:
-        return compute_metrics(self.trades)
+    side: str
+    entry_price: float
+    entry_time: float
+    size_usd: float
+    signals: dict[str, object]
 
 
 # ---------------------------------------------------------------------------
 # Population
 # ---------------------------------------------------------------------------
 
+# Имена параметров BotParams — для сериализации
+PARAM_NAMES = (
+    "imbalance_threshold", "flow_threshold", "take_profit_usd",
+    "stop_loss_usd", "max_hold_seconds", "eth_move_threshold", "leader_weight",
+)
+
 
 class Population:
-    """Популяция ботов — создание, торговля, эволюция."""
+    """Популяция ботов — stateless, состояние в DB."""
 
     def __init__(
         self,
@@ -71,42 +92,78 @@ class Population:
         genetics_config: GeneticsConfig,
         evolution_trigger_trades: int,
         filter_config: FilterConfig,
+        db: StateDBProtocol,
     ) -> None:
+        self._size = size
         self._paper_config = paper_config
         self._fitness_config = fitness_config
         self._genetics_config = genetics_config
         self._filter_config = filter_config
         self._evolution_trigger = evolution_trigger_trades
+        self._db = db
+
+        # In-memory кэш — заполняется в init_from_db()
+        self.bots: list[Bot] = []
         self._generation = 0
         self._total_trades = 0
+
+        # Результаты последнего tick — main.py читает и пишет в DB
         self.last_closed_trades: list[ClosedTrade] = []
+        self.last_opened_positions: list[OpenedPosition] = []
 
-        self.bots = self._create_bots(size)
+    async def init_from_db(self) -> None:
+        """Загружает состояние из DB или создаёт новую популяцию."""
+        gen, total = await self._db.get_generation()
+        self._generation = gen
+        self._total_trades = total
 
-    def _create_bots(self, size: int) -> list[Bot]:
-        """Создаёт начальную популяцию со случайными параметрами."""
-        bots: list[Bot] = []
-        for i in range(size):
-            params = random_params()
-            bots.append(
-                Bot(
-                    bot_id=i,
-                    params=params,
-                    engine=DecisionEngine(params, self._filter_config),
-                    executor=PaperExecutor(self._paper_config),
-                    generation=self._generation,
-                )
+        bot_rows = await self._db.load_bots()
+        if bot_rows:
+            logger.info(
+                "Loaded %d bots from DB, generation=%d, total_trades=%d",
+                len(bot_rows), gen, total,
             )
-        return bots
+            self.bots = self._bots_from_rows(bot_rows)
+        else:
+            logger.info("No bots in DB, creating new population of %d", self._size)
+            self.bots = self._create_new_bots(self._size)
+            await self._save_bots_to_db()
+
+        # Восстанавливаем балансы из DB (только текущее поколение)
+        for bot in self.bots:
+            bot.balance = await self._db.get_bot_balance(
+                bot.bot_id, self._paper_config.initial_balance_usd,
+                self._generation,
+            )
+
+        # Восстанавливаем открытые позиции из DB
+        positions = await self._db.load_positions()
+        for pos in positions:
+            found = self._find_bot(pos.bot_id)
+            if found is not None:
+                found.engine.position = Position(
+                    side=Signal(pos.side),
+                    entry_price=pos.entry_price,
+                    entry_time=pos.entry_time,
+                    size_usd=pos.size_usd,
+                )
+                found.entry_signals = pos.entry_signals
+                logger.info(
+                    "Restored position for bot %d: %s @ %.2f",
+                    pos.bot_id, pos.side, pos.entry_price,
+                )
 
     def process_signals(
-        self, values: SignalValues, current_price: float, spread: float, now: float
+        self, values: SignalValues, current_price: float, spread: float, now: float,
     ) -> list[tuple[int, Signal]]:
         """Обрабатывает сигналы для всех ботов. Возвращает (bot_id, signal).
 
-        Закрытые сделки доступны через self.last_closed_trades.
+        Побочные эффекты доступны через:
+        - self.last_closed_trades (закрытые сделки)
+        - self.last_opened_positions (открытые позиции)
         """
         self.last_closed_trades = []
+        self.last_opened_positions = []
         results: list[tuple[int, Signal]] = []
 
         for bot in self.bots:
@@ -119,30 +176,69 @@ class Population:
         """Пора ли запускать эволюцию."""
         return self._total_trades >= self._evolution_trigger
 
-    def run_evolution(self) -> None:
-        """Запуск цикла эволюции."""
-        scores = [
-            compute_fitness(bot.fitness_metrics, self._fitness_config)
-            for bot in self.bots
-        ]
+    async def run_evolution(self) -> None:
+        """Запуск цикла эволюции — читает trades из DB, эволюционирует, сохраняет."""
+        scores: list[float] = []
+        for bot in self.bots:
+            trade_rows = await self._db.get_trades_for_bot(
+                bot.bot_id, self._generation,
+            )
+            records = [
+                TradeRecord(pnl=t.pnl, entry_time=t.entry_time, exit_time=t.exit_time)
+                for t in trade_rows
+            ]
+            metrics = compute_metrics(records)
+            scores.append(compute_fitness(metrics, self._fitness_config))
+
         params_list = [bot.params for bot in self.bots]
         new_params = evolve(params_list, scores, self._genetics_config)
 
-        self._generation += 1
-        self._total_trades = 0
+        best_idx = scores.index(max(scores)) if scores else 0
+        avg_fitness = sum(scores) / len(scores) if scores else 0.0
+        best_bot = self.bots[best_idx]
+        best_params = {k: getattr(best_bot.params, k) for k in PARAM_NAMES}
 
+        new_generation = self._generation + 1
+
+        # Новые боты
         new_bots: list[Bot] = []
+        new_bot_rows: list[BotRow] = []
         for i, params in enumerate(new_params):
-            new_bots.append(
-                Bot(
-                    bot_id=i,
-                    params=params,
-                    engine=DecisionEngine(params, self._filter_config),
-                    executor=PaperExecutor(self._paper_config),
-                    generation=self._generation,
-                )
-            )
+            new_bots.append(Bot(
+                bot_id=i,
+                params=params,
+                engine=DecisionEngine(params, self._filter_config),
+                generation=new_generation,
+                balance=self._paper_config.initial_balance_usd,
+            ))
+            new_bot_rows.append(BotRow(
+                bot_id=i,
+                generation=new_generation,
+                params={k: getattr(params, k) for k in PARAM_NAMES},
+            ))
+
+        # Атомарная запись в DB
+        await self._db.run_evolution_tx(
+            generation=new_generation,
+            total_trades=0,
+            bots=new_bot_rows,
+            best_fitness=scores[best_idx] if scores else 0.0,
+            avg_fitness=avg_fitness,
+            best_params=best_params,
+        )
+
+        self._generation = new_generation
+        self._total_trades = 0
         self.bots = new_bots
+
+        logger.info("Evolution complete: generation=%d", self._generation)
+
+    def on_trade_closed(self, ct: ClosedTrade) -> None:
+        """Обновляет кэш после записи сделки в DB."""
+        bot = self._find_bot(ct.bot_id)
+        if bot is not None:
+            bot.balance += ct.pnl - ct.fees
+        self._total_trades += 1
 
     @property
     def generation(self) -> int:
@@ -169,33 +265,109 @@ class Population:
         if engine.position is not None and engine.should_exit(current_price, now):
             pos = engine.position
             pnl = engine.close_position(current_price)
-            bot.executor.apply_pnl(pnl)
-            bot.trades.append(TradeRecord(
-                pnl=pnl,
-                entry_time=pos.entry_time,
-                exit_time=now,
-            ))
+            fees = self._compute_fees(spread, current_price)
+            # PnL уже не включает fees — вычитаем отдельно
+            net_pnl = pnl - fees
             self.last_closed_trades.append(ClosedTrade(
                 bot_id=bot.bot_id,
                 generation=bot.generation,
                 side=pos.side.value,
                 entry_price=pos.entry_price,
                 exit_price=current_price,
-                pnl=pnl,
+                pnl=net_pnl,
+                fees=fees,
                 entry_time=pos.entry_time,
                 exit_time=now,
+                entry_signals=bot.entry_signals,
+                exit_signals=_values_to_dict(values),
             ))
-            self._total_trades += 1
+            bot.entry_signals = None
             return Signal.HOLD
 
         # Проверяем вход
         if engine.position is None:
+            # Проверяем что баланс позволяет открыть позицию
+            if bot.balance < self._paper_config.position_size_usd:
+                return Signal.HOLD
+
             signal = engine.compute_entry_signal(values, current_price, now)
             if signal != Signal.HOLD:
                 engine.open_position(
                     signal, current_price, now,
                     size_usd=self._paper_config.position_size_usd,
                 )
+                signals_dict = _values_to_dict(values)
+                bot.entry_signals = signals_dict
+                self.last_opened_positions.append(OpenedPosition(
+                    bot_id=bot.bot_id,
+                    side=signal.value,
+                    entry_price=current_price,
+                    entry_time=now,
+                    size_usd=self._paper_config.position_size_usd,
+                    signals=signals_dict,
+                ))
             return signal
 
         return Signal.HOLD
+
+    def _compute_fees(self, spread: float, price: float) -> float:
+        """Комиссия: taker fee + slippage."""
+        cfg = self._paper_config
+        slippage_usd = cfg.slippage_factor * spread
+        slippage_pct = slippage_usd / price if price > 0 else 0.0
+        return cfg.position_size_usd * (cfg.taker_fee + slippage_pct)
+
+    def _create_new_bots(self, size: int) -> list[Bot]:
+        bots: list[Bot] = []
+        for i in range(size):
+            params = random_params()
+            bots.append(Bot(
+                bot_id=i,
+                params=params,
+                engine=DecisionEngine(params, self._filter_config),
+                generation=self._generation,
+                balance=self._paper_config.initial_balance_usd,
+            ))
+        return bots
+
+    def _bots_from_rows(self, rows: list[BotRow]) -> list[Bot]:
+        bots: list[Bot] = []
+        for row in rows:
+            # params хранятся как JSONB — значения всегда float
+            raw = row.params
+            params = BotParams(**{k: float(str(raw[k])) for k in PARAM_NAMES})
+            bots.append(Bot(
+                bot_id=row.bot_id,
+                params=params,
+                engine=DecisionEngine(params, self._filter_config),
+                generation=row.generation,
+            ))
+        return bots
+
+    async def _save_bots_to_db(self) -> None:
+        await self._db.save_bots([
+            BotRow(
+                bot_id=b.bot_id,
+                generation=b.generation,
+                params={k: getattr(b.params, k) for k in PARAM_NAMES},
+            )
+            for b in self.bots
+        ])
+
+    def _find_bot(self, bot_id: int) -> Bot | None:
+        for bot in self.bots:
+            if bot.bot_id == bot_id:
+                return bot
+        return None
+
+
+def _values_to_dict(values: SignalValues) -> dict[str, object]:
+    """Конвертирует SignalValues в dict для JSONB."""
+    return {
+        "imbalance": values.imbalance,
+        "flow_ratio": values.flow_ratio,
+        "eth_lead": values.eth_lead,
+        "btc_change": values.btc_change,
+        "volatility": values.volatility,
+        "spread": values.spread,
+    }

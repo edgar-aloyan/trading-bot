@@ -42,16 +42,19 @@ class FilterConfig:
     max_spread_usd: float
     min_volatility: float
     max_volatility: float
+    flow_weight: float  # вес flow сигнала в _compute_score (был hardcoded 0.5)
 
     @staticmethod
     def from_yaml(path: str) -> FilterConfig:
         with open(path) as f:
             raw = yaml.safe_load(f)
         flt = raw["filters"]
+        sig = raw["signals"]
         return FilterConfig(
             max_spread_usd=flt["max_spread_usd"],
             min_volatility=flt["min_volatility"],
             max_volatility=flt["max_volatility"],
+            flow_weight=float(sig["flow_weight"]),
         )
 
 
@@ -117,7 +120,7 @@ class DecisionEngine:
         if pnl <= -self.params.stop_loss_usd:
             return True
 
-        # Timeout
+        # Timeout — checked each tick, so resolution depends on WebSocket frequency
         hold_time = now - self.position.entry_time
         return hold_time >= self.params.max_hold_seconds
 
@@ -167,10 +170,11 @@ class DecisionEngine:
             score -= (1 - params.imbalance_threshold) - values.imbalance
 
         # Trade Flow: подтверждающий сигнал
+        fw = self.filters.flow_weight
         if values.flow_ratio > params.flow_threshold:
-            score += (values.flow_ratio - params.flow_threshold) * 0.5
+            score += (values.flow_ratio - params.flow_threshold) * fw
         elif values.flow_ratio < (1 / params.flow_threshold):
-            score -= ((1 / params.flow_threshold) - values.flow_ratio) * 0.5
+            score -= ((1 / params.flow_threshold) - values.flow_ratio) * fw
 
         # ETH lead-lag: поводырь усиливает сигнал
         if abs(values.eth_lead) > params.eth_move_threshold:

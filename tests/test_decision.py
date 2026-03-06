@@ -11,6 +11,7 @@ def _default_filters() -> FilterConfig:
         max_spread_usd=2.0,
         min_volatility=0.0001,
         max_volatility=0.01,
+        flow_weight=0.5,
     )
 
 

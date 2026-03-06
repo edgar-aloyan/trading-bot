@@ -5,40 +5,39 @@
 2. SignalComputer вычисляет сырые сигналы
 3. Population обрабатывает сигналы для каждого бота
 4. Voting определяет итоговый сигнал
-5. Logger записывает всё
+5. DB записывает всё (единственный stateful компонент)
 6. При достижении trigger — эволюция
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import signal
 import time
-from dataclasses import asdict
 
 from core.decision import FilterConfig
 from core.market_data import MarketDataConfig, MarketDataStream, MarketSnapshot
 from core.signals import SignalComputer, SignalsConfig
 from ensemble.voting import VotingConfig, compute_vote
-from evolution.fitness import FitnessConfig, compute_fitness
+from evolution.fitness import FitnessConfig
 from evolution.genetics import GeneticsConfig
 from evolution.population import Population
-from monitoring.logger import (
-    EvolutionEvent,
-    StructuredLogger,
-    SystemEvent,
-    TradeEvent,
-)
 from paper.simulator import PaperTradingConfig
+from storage.database import PositionRow, StateDB, StateDBProtocol, TradeRow
+
+logger = logging.getLogger(__name__)
 
 CONFIG_PATH = "config/params.yaml"
 
 
 class TradingBot:
-    """Оркестратор — связывает все модули."""
+    """Оркестратор — связывает все модули. Stateless — состояние в DB."""
 
-    def __init__(self, config_path: str = CONFIG_PATH) -> None:
+    def __init__(self, db: StateDBProtocol, config_path: str = CONFIG_PATH) -> None:
         self._config_path = config_path
+        self._db = db
 
         # Загружаем все конфиги
         self._market_config = MarketDataConfig.from_yaml(config_path)
@@ -55,35 +54,40 @@ class TradingBot:
         with open(config_path) as f:
             raw = yaml.safe_load(f)
         evo = raw["evolution"]
-        pop_size: int = evo["population_size"]
-        trigger: int = evo["evolution_trigger_trades"]
+        self._pop_size: int = evo["population_size"]
+        self._trigger: int = evo["evolution_trigger_trades"]
 
-        # Создаём компоненты
+        # Создаём stateless компоненты
         self._stream = MarketDataStream(self._market_config)
         self._signal_computer = SignalComputer(self._signals_config)
+        self._population: Population | None = None
+        self._running = False
+
+    async def _init_population(self) -> None:
+        """Создаёт и загружает популяцию из DB."""
         self._population = Population(
-            size=pop_size,
+            size=self._pop_size,
             paper_config=self._paper_config,
             fitness_config=self._fitness_config,
             genetics_config=self._genetics_config,
-            evolution_trigger_trades=trigger,
+            evolution_trigger_trades=self._trigger,
             filter_config=self._filter_config,
+            db=self._db,
         )
-        self._logger = StructuredLogger()
-        self._running = False
+        await self._population.init_from_db()
 
     async def start(self) -> None:
         """Запуск бота."""
+        await self._init_population()
+        assert self._population is not None
+
         self._running = True
-        self._logger.log_system(SystemEvent(
-            event="system_start",
-            timestamp=time.time(),
-            message="Trading bot started",
-            details={
-                "population_size": len(self._population.bots),
-                "symbol": self._market_config.symbol,
-            },
-        ))
+        logger.info(
+            "Trading bot started: population=%d, symbol=%s, generation=%d",
+            len(self._population.bots),
+            self._market_config.symbol,
+            self._population.generation,
+        )
 
         # Регистрируемся как слушатель market data
         self._stream.add_listener(self)
@@ -95,30 +99,27 @@ class TradingBot:
         """Остановка бота."""
         self._running = False
         await self._stream.stop()
-        self._logger.log_system(SystemEvent(
-            event="system_stop",
-            timestamp=time.time(),
-            message="Trading bot stopped",
-            details={"generation": self._population.generation},
-        ))
+        gen = self._population.generation if self._population else 0
+        logger.info("Trading bot stopped: generation=%d", gen)
 
     async def on_market_update(self, snapshot: MarketSnapshot) -> None:
         """Callback от MarketDataStream — основной цикл обработки."""
-        if not self._running:
+        if not self._running or self._population is None:
             return
 
         try:
-            self._process_snapshot(snapshot)
-        except Exception as exc:
-            self._logger.log_system(SystemEvent(
-                event="processing_error",
-                timestamp=time.time(),
-                message=f"Error in on_market_update: {exc}",
-                details={"type": type(exc).__name__},
-            ))
+            await self._process_snapshot(snapshot)
+        except Exception:
+            logger.exception("Error in on_market_update")
 
-    def _process_snapshot(self, snapshot: MarketSnapshot) -> None:
-        """Обработка одного снапшота — вынесена для try/except."""
+    async def _process_snapshot(self, snapshot: MarketSnapshot) -> None:
+        """Обработка одного снапшота.
+
+        NOTE: process_signals() mutates in-memory state before DB writes.
+        If a DB write fails, memory diverges from DB until restart (DB wins
+        on reload). Acceptable for paper trading — self-heals on restart.
+        """
+        assert self._population is not None
         now = snapshot.timestamp or time.time()
 
         # 1. Вычисляем сырые сигналы
@@ -131,96 +132,84 @@ class TradingBot:
 
         # 2. Каждый бот обрабатывает сигналы
         bot_signals = self._population.process_signals(
-            values, current_price, spread, now
+            values, current_price, spread, now,
         )
 
-        # 3. Логируем закрытые сделки
-        for ct in self._population.last_closed_trades:
-            bot = self._population.bots[ct.bot_id]
-            self._logger.log_trade(TradeEvent(
-                event="trade_closed",
-                timestamp=now,
-                bot_id=ct.bot_id,
-                generation=ct.generation,
-                params={
-                    k: getattr(bot.params, k)
-                    for k in [
-                        "imbalance_threshold", "flow_threshold",
-                        "take_profit_usd", "stop_loss_usd",
-                    ]
-                },
-                signals=asdict(values),
-                trade={
-                    "side": ct.side,
-                    "entry_price": ct.entry_price,
-                    "exit_price": ct.exit_price,
-                    "pnl": ct.pnl,
-                    "hold_seconds": ct.exit_time - ct.entry_time,
-                },
+        # 3. Записываем открытые позиции в DB
+        for op in self._population.last_opened_positions:
+            await self._db.open_position(PositionRow(
+                bot_id=op.bot_id,
+                side=op.side,
+                entry_price=op.entry_price,
+                entry_time=op.entry_time,
+                size_usd=op.size_usd,
+                entry_signals=op.signals,
             ))
 
-        # 4. Голосование
+        # 4. Записываем закрытые сделки в DB (атомарно: trade + delete position + increment)
+        for ct in self._population.last_closed_trades:
+            total = await self._db.close_trade(TradeRow(
+                bot_id=ct.bot_id,
+                generation=ct.generation,
+                side=ct.side,
+                entry_price=ct.entry_price,
+                exit_price=ct.exit_price,
+                pnl=ct.pnl,
+                fees=ct.fees,
+                entry_time=ct.entry_time,
+                exit_time=ct.exit_time,
+                entry_signals=ct.entry_signals,
+                exit_signals=ct.exit_signals,
+            ))
+            self._population.on_trade_closed(ct)
+            logger.info(
+                "Trade closed: bot=%d pnl=%.4f fees=%.4f price=%.2f->%.2f (%d/%d)",
+                ct.bot_id, ct.pnl, ct.fees, ct.entry_price, ct.exit_price,
+                total, self._trigger,
+            )
+
+        # 5. Голосование
         vote = compute_vote(bot_signals, self._voting_config)
 
-        # 5. Логируем если есть сигнал
         if vote.signal.value != "HOLD":
-            self._logger.log_raw({
-                "event": "ensemble_signal",
-                "timestamp": now,
-                "signal": vote.signal.value,
-                "long_ratio": vote.long_ratio,
-                "short_ratio": vote.short_ratio,
-                "confidence": vote.confidence,
-                "generation": self._population.generation,
-                "price": current_price,
-                "signals": asdict(values),
-            })
+            logger.info(
+                "Ensemble signal: %s confidence=%.2f price=%.2f",
+                vote.signal.value, vote.confidence, current_price,
+            )
 
         # 6. Эволюция если пора
         if self._population.should_evolve():
-            self._run_evolution(now)
-
-    def _run_evolution(self, now: float) -> None:
-        """Запуск эволюции с логированием."""
-        # Собираем метрики до эволюции
-        scores = [
-            compute_fitness(bot.fitness_metrics, self._fitness_config)
-            for bot in self._population.bots
-        ]
-        best_idx = scores.index(max(scores))
-        best_bot = self._population.bots[best_idx]
-
-        avg_fitness = sum(scores) / len(scores) if scores else 0.0
-
-        self._logger.log_evolution(EvolutionEvent(
-            event="evolution_completed",
-            timestamp=now,
-            generation=self._population.generation,
-            population_size=len(self._population.bots),
-            best_fitness=scores[best_idx],
-            avg_fitness=avg_fitness,
-            best_params={
-                k: getattr(best_bot.params, k)
-                for k in [
-                    "imbalance_threshold", "flow_threshold",
-                    "take_profit_usd", "stop_loss_usd",
-                    "max_hold_seconds", "leader_weight",
-                ]
-            },
-        ))
-
-        self._population.run_evolution()
+            await self._population.run_evolution()
 
 
 async def main() -> None:
-    bot = TradingBot()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    )
 
-    # Graceful shutdown по Ctrl+C
+    dsn = os.environ.get(
+        "DATABASE_URL",
+        "postgresql://trading:trading_dev@localhost:5432/trading",
+    )
+    db = StateDB(dsn)
+    await db.connect()
+
+    bot = TradingBot(db)
+
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
 
-    await bot.start()
+    try:
+        await bot.start()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Bot crashed")
+        raise
+    finally:
+        await db.close()
 
 
 if __name__ == "__main__":

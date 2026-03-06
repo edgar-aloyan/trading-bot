@@ -191,6 +191,7 @@ class MarketDataStream:
 
         self._exchange = ccxtpro.bybit({"enableRateLimit": True})
         self._running = True
+        logger.info("Connecting to Bybit WebSocket...")
 
         tasks = [
             self._watch_order_book(self._config.symbol, is_leader=False),
@@ -206,6 +207,8 @@ class MarketDataStream:
 
         try:
             await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            logger.info("WebSocket tasks cancelled, shutting down")
         finally:
             await self.stop()
 
@@ -221,11 +224,15 @@ class MarketDataStream:
         assert self._exchange is not None
         exchange = self._exchange
         failures = 0
+        received_first = False
         while self._running:
             try:
                 ob = await exchange.watch_order_book(
                     symbol, limit=self._config.orderbook_depth
                 )
+                if not received_first:
+                    logger.info("order_book %s: first update received", symbol)
+                    received_first = True
                 book = self._parse_order_book(ob)
                 if is_leader:
                     self._eth_book = book
@@ -250,9 +257,16 @@ class MarketDataStream:
         assert self._exchange is not None
         exchange = self._exchange
         failures = 0
+        received_first = False
         while self._running:
             try:
                 trades_raw = await exchange.watch_trades(symbol)
+                if not received_first:
+                    logger.info(
+                        "trades %s: first update received (%d trades)",
+                        symbol, len(trades_raw),
+                    )
+                    received_first = True
                 for t in trades_raw:
                     trade = Trade(
                         price=float(t["price"]),
@@ -281,9 +295,13 @@ class MarketDataStream:
         assert self._exchange is not None
         exchange = self._exchange
         failures = 0
+        received_first = False
         while self._running:
             try:
                 ticker = await exchange.watch_ticker(symbol)
+                if not received_first:
+                    logger.info("ticker %s: first update received", symbol)
+                    received_first = True
                 funding = ticker.get("info", {})
                 self._btc_perp = TickerInfo(
                     funding_rate=float(funding.get("fundingRate", 0.0)),
