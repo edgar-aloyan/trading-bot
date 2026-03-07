@@ -20,18 +20,27 @@
 
 ---
 
-## 2. Технический стек
+## 2. Архитектура
+
+**Stateless bot + PostgreSQL (TimescaleDB).**
+
+Бот полностью stateless — всё состояние хранится в PostgreSQL.
+При рестарте бот загружает ботов, позиции и балансы из DB и продолжает работу.
+DB — единственный source of truth и полный audit trail.
 
 | Компонент         | Решение                          |
 |-------------------|----------------------------------|
 | Язык              | Python 3.12+                     |
 | Типизация         | mypy strict mode                 |
 | Линтер            | ruff                             |
-| Биржа             | Bybit (Testnet для paper trading)|
-| Биржевая либа     | ccxt (async)                     |
+| Биржа             | Bybit                            |
+| Биржевая либа     | ccxt (async WebSocket)           |
 | Асинхронность     | asyncio                          |
-| Контейнер         | Docker                           |
-| Логи              | JSON (структурированные)         |
+| База данных       | PostgreSQL 16 + TimescaleDB      |
+| DB драйвер        | asyncpg (async)                  |
+| Контейнер         | Docker + docker-compose          |
+| Логи              | stderr (stdlib logging)          |
+| Audit trail       | PostgreSQL (trades, evolutions)  |
 
 ---
 
@@ -42,33 +51,34 @@ trading-bot/
 │
 ├── config/
 │   ├── params.yaml          # все параметры системы
-│   └── exchange.yaml        # настройки Bybit Testnet
+│   └── exchange.yaml        # настройки Bybit (API ключи)
 │
 ├── core/
 │   ├── market_data.py       # WebSocket: order book, trades, поводыри
 │   ├── signals.py           # вычисление сигналов (imbalance, flow, leaders)
-│   ├── decision.py          # логика входа/выхода для одного бота
-│   └── execution.py         # отправка ордеров (paper или real)
+│   └── decision.py          # логика входа/выхода для одного бота
 │
 ├── evolution/
-│   ├── population.py        # управление популяцией ботов
+│   ├── population.py        # управление популяцией ботов (stateless)
 │   ├── fitness.py           # оценка каждого бота (multi-objective)
 │   └── genetics.py          # селекция, скрещивание, мутация
 │
 ├── paper/
-│   └── simulator.py         # виртуальный баланс, симуляция комиссий
+│   └── simulator.py         # PaperTradingConfig (fees, slippage, balance)
 │
 ├── ensemble/
 │   └── voting.py            # голосование популяции → итоговый сигнал
 │
-├── monitoring/
-│   └── logger.py            # JSON логи каждого решения
+├── storage/
+│   └── database.py          # StateDB (PostgreSQL), StateDBProtocol, DTOs
 │
 ├── tests/
-│   └── ...                  # тесты каждого модуля
+│   ├── mock_db.py           # MockStateDB — in-memory для тестов без PG
+│   └── test_*.py            # тесты каждого модуля (72 теста)
 │
+├── main.py                  # оркестратор — связывает все модули
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml       # TimescaleDB + bot
 └── SPEC.md                  # этот файл
 ```
 
@@ -81,7 +91,7 @@ trading-bot/
 
 - **Пара:** BTC/USDT (спот)
 - **Биржа:** Bybit
-- **Режим разработки:** Bybit Testnet (paper trading)
+- **Режим разработки:** Bybit (paper trading — виртуальные балансы)
 - **Режим продакшн:** Bybit реальный счёт (только после graduation)
 
 ---
@@ -113,13 +123,15 @@ imbalance < (1 - threshold) → давление продавцов → сигн
 
 ### 6.2 Trade Flow
 ```
-За последние N секунд:
+За последние N секунд (flow_window_seconds из config):
 buy_flow  = объём агрессивных покупок (taker side = buy)
 sell_flow = объём агрессивных продаж (taker side = sell)
-flow_ratio = buy_flow / sell_flow
+flow_ratio = buy_flow / sell_flow  (capped [0.01, 100])
 
 flow_ratio > flow_threshold → подтверждение LONG
 flow_ratio < (1 / flow_threshold) → подтверждение SHORT
+
+Вес flow сигнала регулируется flow_weight (config).
 ```
 
 ### 6.3 Поводыри (Lead-Lag)
@@ -127,10 +139,11 @@ flow_ratio < (1 / flow_threshold) → подтверждение SHORT
 ETH/USDT:
   Если ETH вырос на eth_move_threshold % за последние eth_window сек
   и BTC ещё не отреагировал → усиление сигнала LONG (и наоборот)
+  Вес в итоговом score: leader_weight (параметр бота)
 
 BTC Perpetual Funding Rate:
-  Если funding > funding_positive_threshold → перегрев лонгов → осторожность
-  Если funding < funding_negative_threshold → перегрев шортов → осторожность
+  Считывается из ticker stream, доступен в SignalValues.
+  Пока не используется как фильтр — готов для будущего использования.
 ```
 
 ### 6.4 Фильтры (не торговать когда)
@@ -142,29 +155,31 @@ BTC Perpetual Funding Rate:
 
 ## 7. Параметры одного бота
 
-Каждый бот — это набор параметров из этого пространства:
+Каждый бот — набор из 7 эволюционируемых параметров:
 
-| Параметр               | Стартовый диапазон | Описание                        |
-|------------------------|--------------------|---------------------------------|
-| imbalance_threshold    | 0.55 – 0.85        | Порог дисбаланса стакана        |
-| flow_threshold         | 1.2 – 3.0          | Порог давления потока сделок    |
-| take_profit_usd        | $8 – $40           | Тейк-профит в долларах          |
-| stop_loss_usd          | $5 – $25           | Стоп-лосс в долларах            |
-| max_hold_seconds       | 10 – 120           | Макс. время удержания позиции   |
-| flow_window_seconds    | 3 – 15             | Окно для расчёта trade flow     |
-| eth_window_seconds     | 5 – 30             | Окно для lead-lag ETH           |
-| eth_move_threshold     | 0.01% – 0.05%      | Порог движения ETH              |
-| leader_weight          | 0.0 – 1.0          | Вес поводырей в итоговом сигнале|
+| Параметр               | Диапазон         | Описание                        |
+|------------------------|------------------|---------------------------------|
+| imbalance_threshold    | 0.55 – 0.85      | Порог дисбаланса стакана        |
+| flow_threshold         | 1.2 – 3.0        | Порог давления потока сделок    |
+| take_profit_usd        | $8 – $40         | Тейк-профит в долларах          |
+| stop_loss_usd          | $5 – $25         | Стоп-лосс в долларах            |
+| max_hold_seconds       | 10 – 120         | Макс. время удержания позиции   |
+| eth_move_threshold     | 0.01% – 0.05%   | Порог движения ETH              |
+| leader_weight          | 0.0 – 1.0        | Вес поводырей в итоговом сигнале|
+
+Окна `flow_window_seconds` и `eth_window_seconds` — глобальные параметры
+в `config/params.yaml` (сигналы вычисляются один раз для всех ботов).
 
 ---
 
 ## 8. Популяция и эволюция
 
 ### 8.1 Популяция
-- **Размер:** максимально возможный без деградации производительности
-- **Практический старт:** 20 ботов, масштабировать по мере оптимизации
-- **Виртуальный баланс каждого бота:** $10,000
+- **Размер:** 20 ботов (configurable в params.yaml)
+- **Виртуальный баланс каждого бота:** $10,000 (сбрасывается при эволюции)
+- **Размер позиции:** $1,000
 - **Каждый бот независим** — своя позиция, свой баланс, свои параметры
+- **Проверка баланса:** бот не открывает позицию если баланс < position_size_usd
 
 ### 8.2 Fitness Score (оценка бота)
 ```python
@@ -186,14 +201,14 @@ fitness = (
 ### 8.3 Цикл эволюции (каждые 100 сделок популяции)
 
 ```
-1. Рассчитать fitness каждого бота
+1. Рассчитать fitness каждого бота (по trades текущего поколения из DB)
 2. Отсортировать по fitness
 3. Селекция:
-   - Топ 30%  → выживают без изменений
-   - Средние 40% → наследуют параметры топа (скрещивание)
-   - Худшие 30% → случайные новые параметры (мутация)
-4. Записать в лог: какие параметры изменились и почему
-5. Начать следующее поколение
+   - Топ 30%  → выживают без изменений (элита)
+   - Средние 40% → скрещивание элиты + лёгкая мутация
+   - Худшие 30% → случайные новые параметры
+4. Атомарная запись в DB: новые боты + evolution stats + сброс позиций
+5. Сброс балансов к initial_balance_usd
 ```
 
 ### 8.4 Скрещивание
@@ -201,16 +216,15 @@ fitness = (
 parent_a = лучший бот
 parent_b = второй бот
 
-child.imbalance_threshold = mean(parent_a, parent_b)
-child.flow_threshold      = mean(parent_a, parent_b)
-... (для каждого параметра)
+child.param = mean(parent_a.param, parent_b.param) для каждого параметра
++ лёгкая мутация потомка
 ```
 
 ### 8.5 Мутация
 ```
 Каждый параметр с вероятностью mutation_rate (default: 0.2):
-  новое_значение = текущее ± random(0, mutation_strength)
-  (с ограничением по допустимому диапазону)
+  delta = random(-1, 1) * mutation_strength * (max - min)
+  новое_значение = clamp(текущее + delta, min, max)
 ```
 
 ---
@@ -218,30 +232,30 @@ child.flow_threshold      = mean(parent_a, parent_b)
 ## 9. Голосование (Ensemble Voting)
 
 ```
-Каждые 100ms, после получения новых данных:
+На каждый тик данных:
 
 signals = [бот.compute_signal() for бот in популяция]
 # Возможные значения: LONG, SHORT, HOLD
 
-long_votes  = count(signals == LONG)
-short_votes = count(signals == SHORT)
-ratio       = long_votes / len(популяция)
+long_ratio  = count(LONG) / total
+short_ratio = count(SHORT) / total
 
-if ratio >= voting_threshold_long:   → итог LONG
-if ratio <= voting_threshold_short:  → итог SHORT
-else:                                → HOLD
-
-Размер позиции = пропорционален уверенности голосования
+if long_ratio  >= threshold_long  → итог LONG,  confidence = long_ratio
+if short_ratio >= threshold_short → итог SHORT, confidence = short_ratio
+else → HOLD
 ```
 
 ---
 
-## 10. Paper Trading Simulator
+## 10. Paper Trading
 
-- Симулирует исполнение ордеров по текущей рыночной цене
-- Учитывает комиссии Bybit (maker 0.01%, taker 0.06%)
-- Учитывает slippage (configurable, default: 0.5 * spread)
-- Каждая сделка записывается в JSON лог с полным контекстом
+Виртуальная торговля — без реальных ордеров:
+
+- Каждый бот имеет виртуальный баланс (начальный $10,000)
+- Позиция открывается/закрывается по текущей рыночной цене
+- **Комиссия:** taker fee (0.06%) + slippage (0.5 * spread / price)
+- **PnL:** net of fees (fees вычитаются из PnL при закрытии)
+- **Audit trail:** каждая сделка в DB с entry/exit signals
 
 ---
 
@@ -261,24 +275,31 @@ Graduation **никогда не происходит автоматически
 
 ---
 
-## 12. Мониторинг
+## 12. База данных (PostgreSQL + TimescaleDB)
 
-### JSON Логи (основа)
-Каждое событие пишется в структурированный JSON:
-```json
-{
-  "timestamp": "2026-03-05T14:23:01.234Z",
-  "event": "trade_closed",
-  "bot_id": 7,
-  "generation": 3,
-  "params": { "imbalance_threshold": 0.71, "...": "..." },
-  "signal": { "imbalance": 0.74, "flow_ratio": 1.9, "eth_lead": 0.03 },
-  "trade": { "side": "LONG", "entry": 67421, "exit": 67438, "pnl": 17.0 },
-  "fitness": { "winrate": 0.61, "profit_factor": 1.8, "sharpe": 1.4 }
-}
-```
+### Схема
 
-Анализ логов — через `jq` или скрипты по JSONL файлам.
+- **population** — одна строка: generation, total_trades (CHECK id=1)
+- **bots** — текущее поколение ботов (bot_id, generation, params JSONB)
+- **positions** — открытые позиции (bot_id PK, side, entry_price, entry_signals)
+- **trades** — закрытые сделки (hypertable по created_at). Полный audit: entry/exit signals
+- **evolutions** — история эволюций (generation UNIQUE, best/avg fitness, best_params)
+
+### Атомарные операции
+
+- **close_trade** — одна транзакция: DELETE position + INSERT trade + INCREMENT total_trades
+- **run_evolution_tx** — одна транзакция: INSERT evolution + DELETE/INSERT bots + DELETE positions + UPDATE population
+
+### Восстановление при рестарте
+
+- Загрузка ботов из DB (`load_bots`)
+- Восстановление балансов: `initial_balance + SUM(pnl) - SUM(fees)` за текущее поколение
+- Восстановление открытых позиций с entry_signals
+- Подключение с retry (10 попыток, backoff 2s)
+
+### Протокол
+
+`StateDBProtocol` — Protocol для тестов. `MockStateDB` — in-memory реализация.
 
 ---
 
@@ -290,11 +311,19 @@ Graduation **никогда не происходит автоматически
 4. **Каждое решение логируется с контекстом.** Должно быть понятно почему бот сделал что сделал.
 5. **mypy strict + ruff** — никаких исключений.
 6. **Тест на каждый модуль.** Перед изменением — запустить тесты.
-7. **Эволюция прозрачна.** Лог должен объяснять каждое изменение параметров.
+7. **Эволюция прозрачна.** DB хранит историю каждого поколения.
+8. **Stateless.** Бот не хранит состояние — всё в PostgreSQL.
 
 ---
 
-## 14. Референсы
+## 14. Известные ограничения
+
+- **max_hold_seconds** проверяется на каждом тике (не по таймеру). Разрешение зависит от частоты WebSocket (~100ms). Приемлемо для скальпинга.
+- **In-memory / DB divergence** — если DB write падает после изменения in-memory state, состояние расходится до рестарта. При рестарте DB побеждает. Приемлемо для paper trading.
+
+---
+
+## 15. Референсы
 
 - John Holland — "Adaptation in Natural and Artificial Systems" (1975)
 - Earnest Chan — "Algorithmic Trading" (практика)
@@ -305,4 +334,4 @@ Graduation **никогда не происходит автоматически
 
 ---
 
-*Версия документа: 1.0 | Дата: март 2026*
+*Версия документа: 2.0 | Дата: март 2026*
