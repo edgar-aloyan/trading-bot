@@ -64,14 +64,19 @@ def _long_signal_values() -> SignalValues:
     )
 
 
-async def _make_pop(size: int = 5, trigger: int = 100) -> Population:
+async def _make_pop(
+    size: int = 5,
+    min_trades: int = 3,
+    ready_ratio: float = 0.5,
+) -> Population:
     db = MockStateDB()
     pop = Population(
         size=size,
         paper_config=_paper_config(),
         fitness_config=_fitness_config(),
         genetics_config=_genetics_config(),
-        evolution_trigger_trades=trigger,
+        min_trades_per_bot=min_trades,
+        evolution_ready_ratio=ready_ratio,
         filter_config=_filter_config(),
         db=db,
     )
@@ -98,14 +103,19 @@ class TestPopulation:
 
     @pytest.mark.asyncio
     async def test_evolution_trigger(self) -> None:
-        pop = await _make_pop(trigger=3)
+        # 4 бота, min_trades=2, ready_ratio=0.5 → нужно 2 бота с ≥2 сделками
+        pop = await _make_pop(size=4, min_trades=2, ready_ratio=0.5)
         assert not pop.should_evolve()
-        pop._total_trades = 3
+        # Один бот набрал 2 сделки — мало (1/4 < 0.5)
+        pop._bot_trade_counts = {0: 2}
+        assert not pop.should_evolve()
+        # Два бота набрали 2 сделки — достаточно (2/4 >= 0.5)
+        pop._bot_trade_counts = {0: 2, 1: 2}
         assert pop.should_evolve()
 
     @pytest.mark.asyncio
     async def test_run_evolution(self) -> None:
-        pop = await _make_pop(trigger=3)
+        pop = await _make_pop()
         assert pop.generation == 0
         await pop.run_evolution()
         assert pop.generation == 1

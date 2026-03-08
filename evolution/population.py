@@ -90,7 +90,8 @@ class Population:
         paper_config: PaperTradingConfig,
         fitness_config: FitnessConfig,
         genetics_config: GeneticsConfig,
-        evolution_trigger_trades: int,
+        min_trades_per_bot: int,
+        evolution_ready_ratio: float,
         filter_config: FilterConfig,
         db: StateDBProtocol,
     ) -> None:
@@ -99,13 +100,16 @@ class Population:
         self._fitness_config = fitness_config
         self._genetics_config = genetics_config
         self._filter_config = filter_config
-        self._evolution_trigger = evolution_trigger_trades
+        self._min_trades_per_bot = min_trades_per_bot
+        self._evolution_ready_ratio = evolution_ready_ratio
         self._db = db
 
         # In-memory кэш — заполняется в init_from_db()
         self.bots: list[Bot] = []
         self._generation = 0
         self._total_trades = 0
+        # Счётчик сделок на бота в текущем поколении (in-memory кэш)
+        self._bot_trade_counts: dict[int, int] = {}
 
         # Результаты последнего tick — main.py читает и пишет в DB
         self.last_closed_trades: list[ClosedTrade] = []
@@ -129,7 +133,10 @@ class Population:
             self.bots = self._create_new_bots(self._size)
             await self._save_bots_to_db()
 
-        # Восстанавливаем балансы из DB (только текущее поколение)
+        # Восстанавливаем балансы и счётчики сделок из DB
+        self._bot_trade_counts = await self._db.get_trade_counts(
+            self._generation,
+        )
         for bot in self.bots:
             bot.balance = await self._db.get_bot_balance(
                 bot.bot_id, self._paper_config.initial_balance_usd,
@@ -173,8 +180,17 @@ class Population:
         return results
 
     def should_evolve(self) -> bool:
-        """Пора ли запускать эволюцию."""
-        return self._total_trades >= self._evolution_trigger
+        """Пора ли запускать эволюцию.
+
+        Эволюция когда evolution_ready_ratio ботов набрали min_trades_per_bot.
+        """
+        if not self.bots:
+            return False
+        ready = sum(
+            1 for c in self._bot_trade_counts.values()
+            if c >= self._min_trades_per_bot
+        )
+        return ready >= len(self.bots) * self._evolution_ready_ratio
 
     async def run_evolution(self) -> None:
         """Запуск цикла эволюции — читает trades из DB, эволюционирует, сохраняет."""
@@ -229,6 +245,7 @@ class Population:
 
         self._generation = new_generation
         self._total_trades = 0
+        self._bot_trade_counts = {}
         self.bots = new_bots
 
         logger.info("Evolution complete: generation=%d", self._generation)
@@ -239,6 +256,9 @@ class Population:
         if bot is not None:
             bot.balance += ct.pnl - ct.fees
         self._total_trades += 1
+        self._bot_trade_counts[ct.bot_id] = (
+            self._bot_trade_counts.get(ct.bot_id, 0) + 1
+        )
 
     @property
     def generation(self) -> int:

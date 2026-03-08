@@ -38,6 +38,10 @@ class MockStateDB:
     async def open_position(self, pos: PositionRow) -> None:
         self._positions[pos.bot_id] = pos
 
+    async def open_positions_batch(self, positions: list[PositionRow]) -> None:
+        for pos in positions:
+            self._positions[pos.bot_id] = pos
+
     async def close_position(self, bot_id: int) -> None:
         self._positions.pop(bot_id, None)
 
@@ -51,6 +55,13 @@ class MockStateDB:
         self._total_trades += 1
         return self._total_trades
 
+    async def close_trades_batch(self, trades: list[TradeRow]) -> None:
+        """Батч-закрытие сделок."""
+        for trade in trades:
+            self._positions.pop(trade.bot_id, None)
+            self._trades.append(trade)
+            self._total_trades += 1
+
     async def get_trades_for_generation(self, generation: int) -> list[TradeRow]:
         return [t for t in self._trades if t.generation == generation]
 
@@ -60,8 +71,20 @@ class MockStateDB:
             if t.bot_id == bot_id and t.generation == generation
         ]
 
-    async def get_bot_balance(self, bot_id: int, initial_balance: float, generation: int) -> float:
-        matching = [t for t in self._trades if t.bot_id == bot_id and t.generation == generation]
+    async def get_trade_counts(self, generation: int) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        for t in self._trades:
+            if t.generation == generation:
+                counts[t.bot_id] = counts.get(t.bot_id, 0) + 1
+        return counts
+
+    async def get_bot_balance(
+        self, bot_id: int, initial_balance: float, generation: int,
+    ) -> float:
+        matching = [
+            t for t in self._trades
+            if t.bot_id == bot_id and t.generation == generation
+        ]
         total_pnl = sum(t.pnl for t in matching)
         total_fees = sum(t.fees for t in matching)
         return initial_balance + total_pnl - total_fees

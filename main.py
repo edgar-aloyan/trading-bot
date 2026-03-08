@@ -55,7 +55,8 @@ class TradingBot:
             raw = yaml.safe_load(f)
         evo = raw["evolution"]
         self._pop_size: int = evo["population_size"]
-        self._trigger: int = evo["evolution_trigger_trades"]
+        self._min_trades_per_bot: int = evo["min_trades_per_bot"]
+        self._evolution_ready_ratio: float = evo["evolution_ready_ratio"]
 
         # Создаём stateless компоненты
         self._stream = MarketDataStream(self._market_config)
@@ -70,7 +71,8 @@ class TradingBot:
             paper_config=self._paper_config,
             fitness_config=self._fitness_config,
             genetics_config=self._genetics_config,
-            evolution_trigger_trades=self._trigger,
+            min_trades_per_bot=self._min_trades_per_bot,
+            evolution_ready_ratio=self._evolution_ready_ratio,
             filter_config=self._filter_config,
             db=self._db,
         )
@@ -135,37 +137,45 @@ class TradingBot:
             values, current_price, spread, now,
         )
 
-        # 3. Записываем открытые позиции в DB
-        for op in self._population.last_opened_positions:
-            await self._db.open_position(PositionRow(
-                bot_id=op.bot_id,
-                side=op.side,
-                entry_price=op.entry_price,
-                entry_time=op.entry_time,
-                size_usd=op.size_usd,
-                entry_signals=op.signals,
-            ))
+        # 3. Записываем открытые позиции в DB (батчом)
+        if self._population.last_opened_positions:
+            positions = [
+                PositionRow(
+                    bot_id=op.bot_id,
+                    side=op.side,
+                    entry_price=op.entry_price,
+                    entry_time=op.entry_time,
+                    size_usd=op.size_usd,
+                    entry_signals=op.signals,
+                )
+                for op in self._population.last_opened_positions
+            ]
+            await self._db.open_positions_batch(positions)
 
-        # 4. Записываем закрытые сделки в DB (атомарно: trade + delete position + increment)
-        for ct in self._population.last_closed_trades:
-            total = await self._db.close_trade(TradeRow(
-                bot_id=ct.bot_id,
-                generation=ct.generation,
-                side=ct.side,
-                entry_price=ct.entry_price,
-                exit_price=ct.exit_price,
-                pnl=ct.pnl,
-                fees=ct.fees,
-                entry_time=ct.entry_time,
-                exit_time=ct.exit_time,
-                entry_signals=ct.entry_signals,
-                exit_signals=ct.exit_signals,
-            ))
-            self._population.on_trade_closed(ct)
+        # 4. Записываем закрытые сделки в DB (батчом в одной транзакции)
+        if self._population.last_closed_trades:
+            trades = [
+                TradeRow(
+                    bot_id=ct.bot_id,
+                    generation=ct.generation,
+                    side=ct.side,
+                    entry_price=ct.entry_price,
+                    exit_price=ct.exit_price,
+                    pnl=ct.pnl,
+                    fees=ct.fees,
+                    entry_time=ct.entry_time,
+                    exit_time=ct.exit_time,
+                    entry_signals=ct.entry_signals,
+                    exit_signals=ct.exit_signals,
+                )
+                for ct in self._population.last_closed_trades
+            ]
+            await self._db.close_trades_batch(trades)
+            for ct in self._population.last_closed_trades:
+                self._population.on_trade_closed(ct)
             logger.info(
-                "Trade closed: bot=%d pnl=%.4f fees=%.4f price=%.2f->%.2f (%d/%d)",
-                ct.bot_id, ct.pnl, ct.fees, ct.entry_price, ct.exit_price,
-                total, self._trigger,
+                "Trades closed: %d trades this tick",
+                len(self._population.last_closed_trades),
             )
 
         # 5. Голосование

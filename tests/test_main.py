@@ -52,7 +52,7 @@ class TestTradingBot:
     async def test_creation(self) -> None:
         bot = await _make_bot()
         assert bot._population is not None
-        assert len(bot._population.bots) == 20
+        assert len(bot._population.bots) == 200
         assert bot._population.generation == 0
 
     @pytest.mark.asyncio

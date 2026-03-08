@@ -133,10 +133,17 @@ class StateDBProtocol(Protocol):
     async def save_bots(self, bots: list[BotRow]) -> None: ...
     async def load_bots(self) -> list[BotRow]: ...
     async def open_position(self, pos: PositionRow) -> None: ...
+    async def open_positions_batch(self, positions: list[PositionRow]) -> None: ...
     async def close_position(self, bot_id: int) -> None: ...
     async def load_positions(self) -> list[PositionRow]: ...
     async def close_trade(self, trade: TradeRow) -> int: ...
-    async def get_trades_for_bot(self, bot_id: int, generation: int) -> list[TradeRow]: ...
+    async def close_trades_batch(self, trades: list[TradeRow]) -> None: ...
+    async def get_trades_for_bot(
+        self, bot_id: int, generation: int,
+    ) -> list[TradeRow]: ...
+    async def get_trade_counts(
+        self, generation: int,
+    ) -> dict[int, int]: ...
     async def get_bot_balance(
         self, bot_id: int, initial_balance: float, generation: int,
     ) -> float: ...
@@ -179,7 +186,7 @@ class StateDB:
 
         for attempt in range(1, max_retries + 1):
             try:
-                self._pool = await apg.create_pool(self._dsn, min_size=2, max_size=5)
+                self._pool = await apg.create_pool(self._dsn, min_size=2, max_size=10)
                 break
             except (OSError, apg.PostgresError) as exc:
                 if attempt == max_retries:
@@ -267,6 +274,22 @@ class StateDB:
                 _to_json(pos.entry_signals),
             )
 
+    async def open_positions_batch(self, positions: list[PositionRow]) -> None:
+        """Батч-запись открытых позиций в одной транзакции."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            for pos in positions:
+                await conn.execute(
+                    "INSERT INTO positions "
+                    "(bot_id, side, entry_price, entry_time, size_usd, "
+                    "entry_signals) VALUES ($1, $2, $3, $4, $5, $6::jsonb) "
+                    "ON CONFLICT (bot_id) DO UPDATE SET "
+                    "side=$2, entry_price=$3, entry_time=$4, "
+                    "size_usd=$5, entry_signals=$6::jsonb",
+                    pos.bot_id, pos.side, pos.entry_price,
+                    pos.entry_time, pos.size_usd,
+                    _to_json(pos.entry_signals),
+                )
+
     async def close_position(self, bot_id: int) -> None:
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM positions WHERE bot_id = $1", bot_id)
@@ -317,6 +340,42 @@ class StateDB:
             )
             assert row is not None
             return int(row["total_trades"])
+
+    async def close_trades_batch(self, trades: list[TradeRow]) -> None:
+        """Батч-закрытие сделок: все в одной транзакции."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            for trade in trades:
+                await conn.execute(
+                    "DELETE FROM positions WHERE bot_id = $1",
+                    trade.bot_id,
+                )
+                await conn.execute(
+                    "INSERT INTO trades "
+                    "(bot_id, generation, side, entry_price, exit_price, "
+                    "pnl, fees, entry_time, exit_time, "
+                    "entry_signals, exit_signals) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb)",
+                    trade.bot_id, trade.generation, trade.side,
+                    trade.entry_price, trade.exit_price,
+                    trade.pnl, trade.fees,
+                    trade.entry_time, trade.exit_time,
+                    _to_json(trade.entry_signals),
+                    _to_json(trade.exit_signals),
+                )
+            await conn.execute(
+                "UPDATE population SET total_trades = total_trades + $1",
+                len(trades),
+            )
+
+    async def get_trade_counts(self, generation: int) -> dict[int, int]:
+        """Количество сделок на бота в поколении — для триггера эволюции."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT bot_id, COUNT(*) as cnt "
+                "FROM trades WHERE generation = $1 GROUP BY bot_id",
+                generation,
+            )
+            return {int(r["bot_id"]): int(r["cnt"]) for r in rows}
 
     async def get_trades_for_generation(self, generation: int) -> list[TradeRow]:
         """Все сделки одного поколения — для fitness расчёта."""
