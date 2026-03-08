@@ -106,6 +106,10 @@ class SignalComputer:
 
         self._btc_prices: deque[_PriceSample] = deque()
         self._eth_prices: deque[_PriceSample] = deque()
+        # Volatility рассчитывается по сэмплам раз в секунду, а не на каждый тик,
+        # чтобы измерять рыночную волатильность, а не тиковый шум
+        self._btc_vol_prices: deque[_PriceSample] = deque()
+        self._last_vol_sample_time: float = 0.0
 
     def update(self, snapshot: MarketSnapshot) -> SignalValues:
         """Обновляет историю и вычисляет все сигналы."""
@@ -138,6 +142,10 @@ class SignalComputer:
         btc_mid = snapshot.btc_book.mid_price
         if btc_mid > 0:
             self._btc_prices.append(_PriceSample(btc_mid, now))
+            # Сэмплируем для volatility не чаще раза в секунду
+            if now - self._last_vol_sample_time >= 1.0:
+                self._btc_vol_prices.append(_PriceSample(btc_mid, now))
+                self._last_vol_sample_time = now
 
         eth_mid = snapshot.eth_book.mid_price
         if eth_mid > 0:
@@ -149,6 +157,8 @@ class SignalComputer:
             self._btc_prices.popleft()
         while self._eth_prices and self._eth_prices[0].timestamp < cutoff:
             self._eth_prices.popleft()
+        while self._btc_vol_prices and self._btc_vol_prices[0].timestamp < cutoff:
+            self._btc_vol_prices.popleft()
 
     @staticmethod
     def _compute_price_change(
@@ -170,11 +180,14 @@ class SignalComputer:
         return (latest.price - oldest_in_window.price) / oldest_in_window.price
 
     def _compute_volatility(self, now: float) -> float:
-        """Стандартное отклонение доходностей BTC за volatility_window."""
+        """Стандартное отклонение доходностей BTC за volatility_window.
+
+        Использует 1-секундные сэмплы вместо тиковых данных,
+        чтобы измерять рыночную волатильность, а не микрошум.
+        """
         cutoff = now - self._config.volatility_window_seconds
-        # Собираем цены в окне
         prices_in_window = [
-            s.price for s in self._btc_prices if s.timestamp >= cutoff
+            s.price for s in self._btc_vol_prices if s.timestamp >= cutoff
         ]
         if len(prices_in_window) < 3:
             return 0.0
