@@ -30,7 +30,7 @@ PARAM_RANGES: dict[str, ParamRange] = {
     "flow_threshold": ParamRange(1.2, 3.0),
     "take_profit_usd": ParamRange(8.0, 40.0),
     "stop_loss_usd": ParamRange(5.0, 25.0),
-    "max_hold_seconds": ParamRange(10.0, 120.0),
+    "max_hold_seconds": ParamRange(10.0, 300.0),
     "eth_move_threshold": ParamRange(0.0001, 0.0005),
     "leader_weight": ParamRange(0.0, 1.0),
 }
@@ -50,6 +50,8 @@ class GeneticsConfig:
     mutation_ratio: float
     mutation_rate: float
     mutation_strength: float
+    crossover_alpha: float
+    tournament_size: int
 
     @staticmethod
     def from_yaml(path: str) -> GeneticsConfig:
@@ -62,6 +64,8 @@ class GeneticsConfig:
             mutation_ratio=evo["mutation_ratio"],
             mutation_rate=evo["mutation_rate"],
             mutation_strength=evo["mutation_strength"],
+            crossover_alpha=evo["crossover_alpha"],
+            tournament_size=evo["tournament_size"],
         )
 
 
@@ -78,13 +82,23 @@ def random_params() -> BotParams:
     return BotParams(**values)
 
 
-def crossover(parent_a: BotParams, parent_b: BotParams) -> BotParams:
-    """Скрещивание двух ботов — среднее значение каждого параметра."""
+def crossover(
+    parent_a: BotParams, parent_b: BotParams, alpha: float,
+) -> BotParams:
+    """BLX-alpha crossover — ребёнок сэмплируется из расширенного диапазона.
+
+    При alpha=0 — uniform в [min, max] родителей.
+    При alpha=0.5 — может выйти на 50% за пределы родителей (exploration).
+    """
     values: dict[str, float] = {}
-    for name in PARAM_RANGES:
+    for name, r in PARAM_RANGES.items():
         val_a = getattr(parent_a, name)
         val_b = getattr(parent_b, name)
-        values[name] = (val_a + val_b) / 2.0
+        lo = min(val_a, val_b)
+        hi = max(val_a, val_b)
+        span = hi - lo
+        child_val = random.uniform(lo - alpha * span, hi + alpha * span)
+        values[name] = _clamp(child_val, r.min_val, r.max_val)
     return BotParams(**values)
 
 
@@ -111,17 +125,19 @@ def evolve(
     fitness_scores: list[float],
     config: GeneticsConfig,
 ) -> list[BotParams]:
-    """Один цикл эволюции по SPEC.md:
+    """Один цикл эволюции:
 
     1. Сортировать по fitness
-    2. Топ elite_ratio — выживают
-    3. Средние crossover_ratio — скрещиваются с элитой
-    4. Худшие mutation_ratio — заменяются случайными
+    2. Топ elite_ratio — выживают без изменений
+    3. crossover_ratio — потомки от tournament-selected родителей (BLX-alpha)
+    4. Остаток — заменяются случайными (diversity injection)
     """
     n = len(population)
     # Сортируем по fitness (лучшие первые)
     ranked = sorted(
-        zip(fitness_scores, population, strict=True), key=lambda x: x[0], reverse=True
+        zip(fitness_scores, population, strict=True),
+        key=lambda x: x[0],
+        reverse=True,
     )
 
     n_elite = max(1, int(n * config.elite_ratio))
@@ -135,17 +151,15 @@ def evolve(
     for _, params in ranked[:n_elite]:
         new_population.append(params)
 
-    # Скрещивание — средние наследуют от элиты
-    elite_params = [params for _, params in ranked[:n_elite]]
-    for i in range(n_crossover):
-        parent_a = elite_params[i % len(elite_params)]
-        parent_b = elite_params[(i + 1) % len(elite_params)]
-        child = crossover(parent_a, parent_b)
-        # Лёгкая мутация потомка
+    # Скрещивание — tournament selection из всей популяции
+    for _ in range(n_crossover):
+        parent_a = _tournament_select(ranked, config.tournament_size)
+        parent_b = _tournament_select(ranked, config.tournament_size)
+        child = crossover(parent_a, parent_b, config.crossover_alpha)
         child = mutate(child, config)
         new_population.append(child)
 
-    # Мутанты — полностью случайные
+    # Мутанты — полностью случайные (diversity injection)
     for _ in range(n_mutant):
         new_population.append(random_params())
 
@@ -155,6 +169,16 @@ def evolve(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _tournament_select(
+    ranked: list[tuple[float, BotParams]],
+    tournament_size: int,
+) -> BotParams:
+    """Выбирает лучшего из tournament_size случайных участников."""
+    contestants = random.sample(ranked, min(tournament_size, len(ranked)))
+    # ranked уже (fitness, params) — берём лучшего по fitness
+    return max(contestants, key=lambda x: x[0])[1]
 
 
 def _clamp(value: float, min_val: float, max_val: float) -> float:

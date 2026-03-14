@@ -63,6 +63,8 @@ class TradingBot:
         self._signal_computer = SignalComputer(self._signals_config)
         self._population: Population | None = None
         self._running = False
+        # Защита от одновременных on_market_update (4 watch-цикла в gather)
+        self._lock = asyncio.Lock()
 
     async def _init_population(self) -> None:
         """Создаёт и загружает популяцию из DB."""
@@ -105,14 +107,20 @@ class TradingBot:
         logger.info("Trading bot stopped: generation=%d", gen)
 
     async def on_market_update(self, snapshot: MarketSnapshot) -> None:
-        """Callback от MarketDataStream — основной цикл обработки."""
+        """Callback от MarketDataStream — основной цикл обработки.
+
+        Lock нужен: 4 watch-цикла шлют обновления параллельно через
+        asyncio.gather. Без lock'а process_signals() одного вызова может
+        сбросить last_closed_trades пока другой ещё не дописал их в DB.
+        """
         if not self._running or self._population is None:
             return
 
-        try:
-            await self._process_snapshot(snapshot)
-        except Exception:
-            logger.exception("Error in on_market_update")
+        async with self._lock:
+            try:
+                await self._process_snapshot(snapshot)
+            except Exception:
+                logger.exception("Error in on_market_update")
 
     async def _process_snapshot(self, snapshot: MarketSnapshot) -> None:
         """Обработка одного снапшота.

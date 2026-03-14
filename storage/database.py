@@ -452,17 +452,19 @@ class StateDB:
     async def get_bot_balance(
         self, bot_id: int, initial_balance: float, generation: int,
     ) -> float:
-        """Balance = initial + SUM(pnl) - SUM(fees) for current generation only."""
+        """Balance = initial + SUM(pnl) for current generation only.
+
+        pnl в DB уже net (gross - fees), повторно вычитать fees не нужно.
+        """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT COALESCE(SUM(pnl), 0) as total_pnl, "
-                "COALESCE(SUM(fees), 0) as total_fees "
+                "SELECT COALESCE(SUM(pnl), 0) as total_pnl "
                 "FROM trades WHERE bot_id = $1 AND generation = $2",
                 bot_id, generation,
             )
             if row is None:
                 return initial_balance
-            return initial_balance + float(row["total_pnl"]) - float(row["total_fees"])
+            return initial_balance + float(row["total_pnl"])
 
 
 # ---------------------------------------------------------------------------

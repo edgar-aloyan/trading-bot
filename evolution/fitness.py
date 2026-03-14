@@ -1,12 +1,14 @@
-"""Оценка качества бота — multi-objective fitness score.
+"""Оценка качества бота — log-growth fitness (критерий Келли).
 
-Формула из SPEC.md:
-  fitness = winrate * 0.30 + profit_factor * 0.30
-          + sharpe_ratio * 0.20 - max_drawdown_pct * 0.20
+fitness = mean(log(1 + pnl_i / position_size))
+
+Логарифм естественно встраивает риск: потери весят непропорционально
+больше прибылей той же величины. Не нужны отдельные веса, caps, floors.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import yaml
@@ -18,12 +20,10 @@ import yaml
 
 @dataclass(frozen=True, slots=True)
 class FitnessConfig:
-    """Веса fitness функции из params.yaml."""
+    """Параметры fitness функции из params.yaml."""
 
-    winrate_weight: float
-    profit_factor_weight: float
-    sharpe_weight: float
-    drawdown_weight: float
+    # Бот с < min_trades получает пропорционально сниженный fitness
+    min_trades_for_full_fitness: int
 
     @staticmethod
     def from_yaml(path: str) -> FitnessConfig:
@@ -31,10 +31,7 @@ class FitnessConfig:
             raw = yaml.safe_load(f)
         fit = raw["fitness"]
         return FitnessConfig(
-            winrate_weight=fit["winrate_weight"],
-            profit_factor_weight=fit["profit_factor_weight"],
-            sharpe_weight=fit["sharpe_weight"],
-            drawdown_weight=fit["drawdown_weight"],
+            min_trades_for_full_fitness=fit["min_trades_for_full_fitness"],
         )
 
 
@@ -103,19 +100,29 @@ def compute_metrics(trades: list[TradeRecord]) -> FitnessMetrics:
     )
 
 
-def compute_fitness(metrics: FitnessMetrics, config: FitnessConfig) -> float:
-    """Итоговый fitness score по формуле из SPEC.md."""
-    return (
-        metrics.winrate * config.winrate_weight
-        + metrics.profit_factor * config.profit_factor_weight
-        + metrics.sharpe_ratio * config.sharpe_weight
-        - metrics.max_drawdown_pct * config.drawdown_weight
-    )
+def compute_fitness(
+    trades: list[TradeRecord],
+    position_size: float,
+    config: FitnessConfig,
+) -> float:
+    """Log-growth fitness — критерий Келли.
 
+    fitness = mean(log(1 + pnl_i / position_size))
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+    Логарифм автоматически:
+    - поощряет рост капитала (позитивная цель)
+    - наказывает потери сильнее чем поощряет прибыли (риск встроен)
+    - не требует весов, caps, normalization
+    """
+    if not trades:
+        return 0.0
+
+    log_returns = [math.log(1.0 + t.pnl / position_size) for t in trades]
+    raw_fitness = sum(log_returns) / len(log_returns)
+
+    # Штраф за малое число сделок — плавная деградация
+    trade_penalty = min(1.0, len(trades) / config.min_trades_for_full_fitness)
+    return raw_fitness * trade_penalty
 
 
 def _compute_sharpe(pnls: list[float]) -> float:
@@ -150,6 +157,6 @@ def _compute_max_drawdown_pct(pnls: list[float]) -> float:
 
     # Нормализуем к пику (если пик > 0)
     if peak > 0:
-        return max_dd / peak
+        return min(1.0, max_dd / peak)
     # Если пика не было (все сделки убыточные), drawdown = 100%
     return 1.0 if max_dd > 0 else 0.0

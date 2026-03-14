@@ -1,12 +1,13 @@
-"""Тесты для evolution/fitness.py."""
+"""Тесты для evolution/fitness.py — log-growth fitness."""
 
 from __future__ import annotations
+
+import math
 
 import pytest
 
 from evolution.fitness import (
     FitnessConfig,
-    FitnessMetrics,
     TradeRecord,
     compute_fitness,
     compute_metrics,
@@ -15,15 +16,15 @@ from evolution.fitness import (
 
 def _default_config() -> FitnessConfig:
     return FitnessConfig(
-        winrate_weight=0.30,
-        profit_factor_weight=0.30,
-        sharpe_weight=0.20,
-        drawdown_weight=0.20,
+        min_trades_for_full_fitness=50,
     )
 
 
+POSITION_SIZE = 1000.0
+
+
 # ---------------------------------------------------------------------------
-# compute_metrics
+# compute_metrics (мониторинг, не влияет на fitness)
 # ---------------------------------------------------------------------------
 
 
@@ -61,73 +62,88 @@ class TestComputeMetrics:
         assert metrics.total_pnl == 20.0
         assert metrics.total_trades == 4
 
-    def test_sharpe_ratio(self) -> None:
-        trades = [
-            TradeRecord(pnl=10.0, entry_time=0, exit_time=1),
-            TradeRecord(pnl=12.0, entry_time=1, exit_time=2),
-            TradeRecord(pnl=8.0, entry_time=2, exit_time=3),
-        ]
-        metrics = compute_metrics(trades)
-        # mean=10, std=sqrt((0+4+4)/3)≈1.63, sharpe≈6.12
-        assert metrics.sharpe_ratio > 5.0
-
-    def test_sharpe_with_few_trades(self) -> None:
-        """При < 3 сделках sharpe = 0."""
-        trades = [TradeRecord(pnl=10.0, entry_time=0, exit_time=1)]
-        metrics = compute_metrics(trades)
-        assert metrics.sharpe_ratio == 0.0
-
-    def test_max_drawdown(self) -> None:
-        trades = [
-            TradeRecord(pnl=100.0, entry_time=0, exit_time=1),  # equity=100
-            TradeRecord(pnl=-50.0, entry_time=1, exit_time=2),  # equity=50, dd=50%
-            TradeRecord(pnl=30.0, entry_time=2, exit_time=3),  # equity=80
-        ]
-        metrics = compute_metrics(trades)
-        assert metrics.max_drawdown_pct == pytest.approx(0.5)
-
 
 # ---------------------------------------------------------------------------
-# compute_fitness
+# compute_fitness — log-growth (критерий Келли)
 # ---------------------------------------------------------------------------
 
 
 class TestComputeFitness:
-    def test_perfect_bot(self) -> None:
-        metrics = FitnessMetrics(
-            winrate=1.0,
-            profit_factor=3.0,
-            sharpe_ratio=2.0,
-            max_drawdown_pct=0.0,
-            total_trades=100,
-            total_pnl=500.0,
-        )
-        score = compute_fitness(metrics, _default_config())
-        # 1.0*0.3 + 3.0*0.3 + 2.0*0.2 - 0.0*0.2 = 0.3 + 0.9 + 0.4 = 1.6
-        assert score == pytest.approx(1.6)
+    def test_empty_trades(self) -> None:
+        score = compute_fitness([], POSITION_SIZE, _default_config())
+        assert score == 0.0
 
-    def test_terrible_bot(self) -> None:
-        metrics = FitnessMetrics(
-            winrate=0.0,
-            profit_factor=0.0,
-            sharpe_ratio=-1.0,
-            max_drawdown_pct=1.0,
-            total_trades=50,
-            total_pnl=-500.0,
-        )
-        score = compute_fitness(metrics, _default_config())
-        # 0 + 0 + (-1)*0.2 - 1.0*0.2 = -0.4
-        assert score == pytest.approx(-0.4)
+    def test_all_wins_positive(self) -> None:
+        """Бот с прибыльными сделками имеет положительный fitness."""
+        trades = [
+            TradeRecord(pnl=10.0, entry_time=0, exit_time=1)
+            for _ in range(50)
+        ]
+        score = compute_fitness(trades, POSITION_SIZE, _default_config())
+        # log(1 + 10/1000) = log(1.01) ≈ 0.00995
+        expected = math.log(1.0 + 10.0 / POSITION_SIZE)
+        assert score == pytest.approx(expected)
+        assert score > 0
 
-    def test_drawdown_penalizes(self) -> None:
-        """Высокий drawdown снижает fitness."""
+    def test_all_losses_negative(self) -> None:
+        """Бот с убыточными сделками имеет отрицательный fitness."""
+        trades = [
+            TradeRecord(pnl=-5.0, entry_time=0, exit_time=1)
+            for _ in range(50)
+        ]
+        score = compute_fitness(trades, POSITION_SIZE, _default_config())
+        expected = math.log(1.0 - 5.0 / POSITION_SIZE)
+        assert score == pytest.approx(expected)
+        assert score < 0
+
+    def test_loss_weighs_more_than_equal_gain(self) -> None:
+        """Потеря $X даёт больший абсолютный вклад чем прибыль $X.
+        Это ключевое свойство log-growth: риск встроен."""
+        gain = math.log(1.0 + 10.0 / POSITION_SIZE)   # +$10
+        loss = math.log(1.0 - 10.0 / POSITION_SIZE)    # -$10
+        # |loss| > |gain| — асимметрия логарифма
+        assert abs(loss) > abs(gain)
+
+    def test_mixed_trades(self) -> None:
+        """Смешанные сделки дают корректный средний log-return."""
+        trades = [
+            TradeRecord(pnl=20.0, entry_time=0, exit_time=1),
+            TradeRecord(pnl=-10.0, entry_time=1, exit_time=2),
+        ]
+        config = FitnessConfig(min_trades_for_full_fitness=2)
+        score = compute_fitness(trades, POSITION_SIZE, config)
+        expected = (
+            math.log(1.0 + 20.0 / POSITION_SIZE)
+            + math.log(1.0 - 10.0 / POSITION_SIZE)
+        ) / 2
+        assert score == pytest.approx(expected)
+
+    def test_trade_penalty(self) -> None:
+        """Бот с малым числом сделок получает пропорциональный штраф."""
+        trades = [
+            TradeRecord(pnl=10.0, entry_time=0, exit_time=1)
+            for _ in range(25)
+        ]
+        config = _default_config()  # min_trades = 50
+        score_25 = compute_fitness(trades, POSITION_SIZE, config)
+        # 50 trades — полный fitness
+        trades_50 = trades * 2
+        score_50 = compute_fitness(trades_50, POSITION_SIZE, config)
+        # 25 из 50 → penalty = 0.5
+        assert score_25 == pytest.approx(score_50 * 0.5)
+
+    def test_bigger_position_reduces_fitness_magnitude(self) -> None:
+        """При большем position_size те же $10 дают меньший log-return."""
+        trades = [TradeRecord(pnl=10.0, entry_time=0, exit_time=1)] * 50
         config = _default_config()
-        good = FitnessMetrics(
-            winrate=0.6, profit_factor=1.5, sharpe_ratio=1.0,
-            max_drawdown_pct=0.05, total_trades=50, total_pnl=100.0,
-        )
-        bad = FitnessMetrics(
-            winrate=0.6, profit_factor=1.5, sharpe_ratio=1.0,
-            max_drawdown_pct=0.50, total_trades=50, total_pnl=100.0,
-        )
-        assert compute_fitness(good, config) > compute_fitness(bad, config)
+        score_1k = compute_fitness(trades, 1000.0, config)
+        score_10k = compute_fitness(trades, 10000.0, config)
+        assert score_1k > score_10k > 0
+
+    def test_profitable_bot_beats_losing_bot(self) -> None:
+        """Прибыльный бот всегда имеет выше fitness чем убыточный."""
+        winners = [TradeRecord(pnl=5.0, entry_time=0, exit_time=1)] * 50
+        losers = [TradeRecord(pnl=-5.0, entry_time=0, exit_time=1)] * 50
+        config = _default_config()
+        assert compute_fitness(winners, POSITION_SIZE, config) > \
+            compute_fitness(losers, POSITION_SIZE, config)

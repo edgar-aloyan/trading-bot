@@ -85,9 +85,9 @@ class MockStateDB:
             t for t in self._trades
             if t.bot_id == bot_id and t.generation == generation
         ]
+        # pnl уже net (gross - fees)
         total_pnl = sum(t.pnl for t in matching)
-        total_fees = sum(t.fees for t in matching)
-        return initial_balance + total_pnl - total_fees
+        return initial_balance + total_pnl
 
     async def insert_evolution(
         self,

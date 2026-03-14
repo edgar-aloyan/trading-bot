@@ -25,10 +25,7 @@ def _paper_config() -> PaperTradingConfig:
 
 def _fitness_config() -> FitnessConfig:
     return FitnessConfig(
-        winrate_weight=0.30,
-        profit_factor_weight=0.30,
-        sharpe_weight=0.20,
-        drawdown_weight=0.20,
+        min_trades_for_full_fitness=50,
     )
 
 
@@ -48,6 +45,8 @@ def _genetics_config() -> GeneticsConfig:
         mutation_ratio=0.3,
         mutation_rate=0.2,
         mutation_strength=0.1,
+        crossover_alpha=0.5,
+        tournament_size=3,
     )
 
 

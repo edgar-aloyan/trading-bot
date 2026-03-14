@@ -30,19 +30,20 @@ filters:
 
 evolution:
   population_size: 200
-  min_trades_per_bot: 30       # минимум сделок на бота для оценки fitness
+  min_trades_per_bot: 50       # минимум сделок на бота для оценки fitness
   evolution_ready_ratio: 0.7071  # 1/√2 — доля ботов, которые должны набрать min_trades
   elite_ratio: 0.3
   crossover_ratio: 0.4
   mutation_ratio: 0.3
   mutation_rate: 0.2
   mutation_strength: 0.1
+  crossover_alpha: 0.5         # BLX-alpha: 0 = uniform, 0.5 = exploration за пределы родителей
+  tournament_size: 3           # число участников tournament selection
 
 fitness:
-  winrate_weight: 0.30
-  profit_factor_weight: 0.30
-  sharpe_weight: 0.20
-  drawdown_weight: 0.20
+  min_trades_for_full_fitness: 50  # ниже — fitness снижается пропорционально
+  # fitness = mean(log(1 + pnl_i / position_size)) — log-growth (критерий Келли)
+  # Нет весов, caps, floors — риск встроен в логарифм
 
 paper_trading:
   initial_balance_usd: 10000

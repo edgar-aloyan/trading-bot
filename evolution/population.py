@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from core.decision import BotParams, DecisionEngine, FilterConfig, Position
 from core.signals import Signal, SignalValues
-from evolution.fitness import FitnessConfig, TradeRecord, compute_fitness, compute_metrics
+from evolution.fitness import FitnessConfig, TradeRecord, compute_fitness
 from evolution.genetics import GeneticsConfig, evolve, random_params
 from paper.simulator import PaperTradingConfig
 from storage.database import BotRow, StateDBProtocol
@@ -203,8 +203,9 @@ class Population:
                 TradeRecord(pnl=t.pnl, entry_time=t.entry_time, exit_time=t.exit_time)
                 for t in trade_rows
             ]
-            metrics = compute_metrics(records)
-            scores.append(compute_fitness(metrics, self._fitness_config))
+            scores.append(compute_fitness(
+                records, self._paper_config.position_size_usd, self._fitness_config,
+            ))
 
         params_list = [bot.params for bot in self.bots]
         new_params = evolve(params_list, scores, self._genetics_config)
@@ -254,7 +255,8 @@ class Population:
         """Обновляет кэш после записи сделки в DB."""
         bot = self._find_bot(ct.bot_id)
         if bot is not None:
-            bot.balance += ct.pnl - ct.fees
+            # ct.pnl уже net (gross - fees), fees вычитать не нужно
+            bot.balance += ct.pnl
         self._total_trades += 1
         self._bot_trade_counts[ct.bot_id] = (
             self._bot_trade_counts.get(ct.bot_id, 0) + 1

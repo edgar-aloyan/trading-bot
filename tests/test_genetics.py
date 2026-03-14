@@ -20,6 +20,8 @@ def _default_config() -> GeneticsConfig:
         mutation_ratio=0.3,
         mutation_rate=0.2,
         mutation_strength=0.1,
+        crossover_alpha=0.5,
+        tournament_size=3,
     )
 
 
@@ -45,7 +47,8 @@ class TestRandomParams:
 
 
 class TestCrossover:
-    def test_average_of_parents(self) -> None:
+    def test_blx_alpha_in_range(self) -> None:
+        """BLX-alpha crossover всегда в допустимых диапазонах."""
         a = BotParams(
             imbalance_threshold=0.60,
             flow_threshold=1.4,
@@ -64,11 +67,49 @@ class TestCrossover:
             eth_move_threshold=0.0004,
             leader_weight=0.8,
         )
-        child = crossover(a, b)
-        assert child.imbalance_threshold == 0.70
-        assert child.flow_threshold == 2.0
-        assert child.take_profit_usd == 20.0
-        assert child.leader_weight == 0.5
+        for _ in range(100):
+            child = crossover(a, b, alpha=0.5)
+            for name, r in PARAM_RANGES.items():
+                val = getattr(child, name)
+                assert r.min_val <= val <= r.max_val, f"{name}={val} out of range"
+
+    def test_blx_alpha_produces_diversity(self) -> None:
+        """BLX-alpha не просто усредняет — даёт разные результаты."""
+        a = _fixed_params()
+        b = BotParams(
+            imbalance_threshold=0.80,
+            flow_threshold=2.5,
+            take_profit_usd=35.0,
+            stop_loss_usd=20.0,
+            max_hold_seconds=100.0,
+            eth_move_threshold=0.0004,
+            leader_weight=0.9,
+        )
+        children = [crossover(a, b, alpha=0.5) for _ in range(20)]
+        # Все дети должны быть разными (стохастичность)
+        unique = {c.imbalance_threshold for c in children}
+        assert len(unique) > 5
+
+    def test_alpha_zero_between_parents(self) -> None:
+        """При alpha=0 ребёнок всегда между родителями."""
+        a = _fixed_params()
+        b = BotParams(
+            imbalance_threshold=0.80,
+            flow_threshold=2.5,
+            take_profit_usd=35.0,
+            stop_loss_usd=20.0,
+            max_hold_seconds=100.0,
+            eth_move_threshold=0.0004,
+            leader_weight=0.9,
+        )
+        for _ in range(50):
+            child = crossover(a, b, alpha=0.0)
+            for name in PARAM_RANGES:
+                val_a = getattr(a, name)
+                val_b = getattr(b, name)
+                val_c = getattr(child, name)
+                lo, hi = min(val_a, val_b), max(val_a, val_b)
+                assert lo <= val_c <= hi, f"{name}: {val_c} not in [{lo}, {hi}]"
 
 
 class TestMutate:
@@ -80,6 +121,8 @@ class TestMutate:
             mutation_ratio=0.3,
             mutation_rate=1.0,  # мутируем всё
             mutation_strength=0.5,  # сильная мутация
+            crossover_alpha=0.5,
+            tournament_size=3,
         )
         params = _fixed_params()
         for _ in range(100):
@@ -96,6 +139,8 @@ class TestMutate:
             mutation_ratio=0.3,
             mutation_rate=0.0,
             mutation_strength=0.5,
+            crossover_alpha=0.5,
+            tournament_size=3,
         )
         params = _fixed_params()
         mutated = mutate(params, config)
