@@ -3,10 +3,10 @@
 Цикл работы:
 1. MarketDataStream получает данные с биржи
 2. SignalComputer вычисляет сырые сигналы
-3. Population обрабатывает сигналы для каждого бота
-4. Voting определяет итоговый сигнал
+3. Каждая популяция обрабатывает сигналы для своих ботов
+4. Voting определяет итоговый сигнал (per-population)
 5. DB записывает всё (единственный stateful компонент)
-6. При достижении trigger — эволюция
+6. При достижении trigger — эволюция (per-population)
 """
 
 from __future__ import annotations
@@ -58,39 +58,63 @@ class TradingBot:
         self._min_trades_per_bot: int = evo["min_trades_per_bot"]
         self._evolution_ready_ratio: float = evo["evolution_ready_ratio"]
 
+        # Эксперименты: список популяций для параллельного тестирования
+        self._experiments: list[dict[str, object]] = raw.get(
+            "experiments",
+            [{"population_id": 1, "name": "default"}],
+        )
+
         # Создаём stateless компоненты
         self._stream = MarketDataStream(self._market_config)
         self._signal_computer = SignalComputer(self._signals_config)
-        self._population: Population | None = None
+        self._populations: list[Population] = []
         self._running = False
         # Защита от одновременных on_market_update (4 watch-цикла в gather)
         self._lock = asyncio.Lock()
 
+    async def _init_populations(self) -> None:
+        """Создаёт и загружает все популяции из DB."""
+        for exp in self._experiments:
+            pop_id = int(str(exp.get("population_id", 1)))
+            pop_name = str(exp.get("name", f"pop-{pop_id}"))
+            pop = Population(
+                size=self._pop_size,
+                paper_config=self._paper_config,
+                fitness_config=self._fitness_config,
+                genetics_config=self._genetics_config,
+                min_trades_per_bot=self._min_trades_per_bot,
+                evolution_ready_ratio=self._evolution_ready_ratio,
+                filter_config=self._filter_config,
+                db=self._db,
+                population_id=pop_id,
+            )
+            await pop.init_from_db()
+            self._populations.append(pop)
+            logger.info(
+                "Population '%s' (id=%d) ready: %d bots, generation=%d",
+                pop_name, pop_id, len(pop.bots), pop.generation,
+            )
+
+    # Обратная совместимость: тесты используют _init_population / _population
     async def _init_population(self) -> None:
-        """Создаёт и загружает популяцию из DB."""
-        self._population = Population(
-            size=self._pop_size,
-            paper_config=self._paper_config,
-            fitness_config=self._fitness_config,
-            genetics_config=self._genetics_config,
-            min_trades_per_bot=self._min_trades_per_bot,
-            evolution_ready_ratio=self._evolution_ready_ratio,
-            filter_config=self._filter_config,
-            db=self._db,
-        )
-        await self._population.init_from_db()
+        """Обратная совместимость — инициализирует одну популяцию."""
+        await self._init_populations()
+
+    @property
+    def _population(self) -> Population | None:
+        """Обратная совместимость — первая популяция."""
+        return self._populations[0] if self._populations else None
 
     async def start(self) -> None:
         """Запуск бота."""
-        await self._init_population()
-        assert self._population is not None
+        await self._init_populations()
 
         self._running = True
+        total_bots = sum(len(p.bots) for p in self._populations)
         logger.info(
-            "Trading bot started: population=%d, symbol=%s, generation=%d",
-            len(self._population.bots),
+            "Trading bot started: %d populations, %d total bots, symbol=%s",
+            len(self._populations), total_bots,
             self._market_config.symbol,
-            self._population.generation,
         )
 
         # Регистрируемся как слушатель market data
@@ -103,8 +127,8 @@ class TradingBot:
         """Остановка бота."""
         self._running = False
         await self._stream.stop()
-        gen = self._population.generation if self._population else 0
-        logger.info("Trading bot stopped: generation=%d", gen)
+        gens = [p.generation for p in self._populations]
+        logger.info("Trading bot stopped: generations=%s", gens)
 
     async def on_market_update(self, snapshot: MarketSnapshot) -> None:
         """Callback от MarketDataStream — основной цикл обработки.
@@ -113,7 +137,7 @@ class TradingBot:
         asyncio.gather. Без lock'а process_signals() одного вызова может
         сбросить last_closed_trades пока другой ещё не дописал их в DB.
         """
-        if not self._running or self._population is None:
+        if not self._running or not self._populations:
             return
 
         async with self._lock:
@@ -123,16 +147,15 @@ class TradingBot:
                 logger.exception("Error in on_market_update")
 
     async def _process_snapshot(self, snapshot: MarketSnapshot) -> None:
-        """Обработка одного снапшота.
+        """Обработка одного снапшота для всех популяций.
 
         NOTE: process_signals() mutates in-memory state before DB writes.
         If a DB write fails, memory diverges from DB until restart (DB wins
         on reload). Acceptable for paper trading — self-heals on restart.
         """
-        assert self._population is not None
         now = snapshot.timestamp or time.time()
 
-        # 1. Вычисляем сырые сигналы
+        # 1. Вычисляем сырые сигналы (один раз для всех популяций)
         values = self._signal_computer.update(snapshot)
         current_price = snapshot.btc_book.mid_price
         spread = snapshot.btc_book.spread
@@ -140,13 +163,25 @@ class TradingBot:
         if current_price == 0:
             return
 
-        # 2. Каждый бот обрабатывает сигналы
-        bot_signals = self._population.process_signals(
-            values, current_price, spread, now,
-        )
+        # 2. Каждая популяция обрабатывает сигналы независимо
+        for pop in self._populations:
+            await self._process_population(pop, values, current_price, spread, now)
 
-        # 3. Записываем открытые позиции в DB (батчом)
-        if self._population.last_opened_positions:
+    async def _process_population(
+        self, pop: Population, values: object, current_price: float,
+        spread: float, now: float,
+    ) -> None:
+        """Обработка одного снапшота для одной популяции."""
+        from core.signals import SignalValues
+        assert isinstance(values, SignalValues)
+
+        pid = pop.population_id
+
+        # Каждый бот обрабатывает сигналы
+        bot_signals = pop.process_signals(values, current_price, spread, now)
+
+        # Записываем открытые позиции в DB (батчом)
+        if pop.last_opened_positions:
             positions = [
                 PositionRow(
                     bot_id=op.bot_id,
@@ -156,12 +191,12 @@ class TradingBot:
                     size_usd=op.size_usd,
                     entry_signals=op.signals,
                 )
-                for op in self._population.last_opened_positions
+                for op in pop.last_opened_positions
             ]
-            await self._db.open_positions_batch(positions)
+            await self._db.open_positions_batch(positions, population_id=pid)
 
-        # 4. Записываем закрытые сделки в DB (батчом в одной транзакции)
-        if self._population.last_closed_trades:
+        # Записываем закрытые сделки в DB (батчом в одной транзакции)
+        if pop.last_closed_trades:
             trades = [
                 TradeRow(
                     bot_id=ct.bot_id,
@@ -176,28 +211,28 @@ class TradingBot:
                     entry_signals=ct.entry_signals,
                     exit_signals=ct.exit_signals,
                 )
-                for ct in self._population.last_closed_trades
+                for ct in pop.last_closed_trades
             ]
-            await self._db.close_trades_batch(trades)
-            for ct in self._population.last_closed_trades:
-                self._population.on_trade_closed(ct)
+            await self._db.close_trades_batch(trades, population_id=pid)
+            for ct in pop.last_closed_trades:
+                pop.on_trade_closed(ct)
             logger.info(
-                "Trades closed: %d trades this tick",
-                len(self._population.last_closed_trades),
+                "Pop %d: %d trades closed this tick",
+                pid, len(pop.last_closed_trades),
             )
 
-        # 5. Голосование
+        # Голосование
         vote = compute_vote(bot_signals, self._voting_config)
 
         if vote.signal.value != "HOLD":
             logger.info(
-                "Ensemble signal: %s confidence=%.2f price=%.2f",
-                vote.signal.value, vote.confidence, current_price,
+                "Pop %d ensemble: %s confidence=%.2f price=%.2f",
+                pid, vote.signal.value, vote.confidence, current_price,
             )
 
-        # 6. Эволюция если пора
-        if self._population.should_evolve():
-            await self._population.run_evolution()
+        # Эволюция если пора
+        if pop.should_evolve():
+            await pop.run_evolution()
 
 
 async def main() -> None:
