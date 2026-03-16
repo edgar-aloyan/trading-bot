@@ -61,6 +61,19 @@ def _long_signal_values() -> SignalValues:
     )
 
 
+def _short_signal_values() -> SignalValues:
+    """Значения, которые должны вызвать SHORT у большинства ботов."""
+    return SignalValues(
+        imbalance=0.10,
+        flow_ratio=0.2,
+        eth_lead=-0.01,
+        btc_change=0.0,
+        funding_rate=0.0,
+        spread=1.0,
+        volatility=0.001,
+    )
+
+
 def _neutral_signal_values() -> SignalValues:
     """Нейтральные сигналы — HOLD."""
     return SignalValues(
@@ -159,6 +172,42 @@ class TestMakerPopulation:
         # Позиция открыта по лимитной цене
         assert bot.engine.position is not None
         assert bot.engine.position.entry_price == 66998.0
+
+    @pytest.mark.asyncio
+    async def test_pending_order_fill_short(self) -> None:
+        """SHORT pending order заполняется когда цена поднимается до лимита."""
+        pop = await _make_maker_pop(size=1)
+        bot = pop.bots[0]
+        bot.params = BotParams(
+            imbalance_threshold=0.55,
+            flow_threshold=1.2,
+            take_profit_usd=20.0,
+            stop_loss_usd=10.0,
+            max_hold_seconds=60.0,
+            eth_move_threshold=0.0001,
+            leader_weight=0.5,
+            limit_offset_usd=3.0,
+            cancel_timeout_seconds=30.0,
+            exit_order_mode=0.0,
+        )
+        bot.engine.params = bot.params
+
+        # Tick 1: SHORT → pending sell at 67003
+        pop.process_signals(_short_signal_values(), 67000.0, 1.0, 1000.0)
+        assert bot.pending_order is not None
+        assert bot.pending_order.side == "SHORT"
+        assert bot.pending_order.limit_price == 67003.0
+
+        # Tick 2: цена ниже лимита — не fill
+        pop.process_signals(_neutral_signal_values(), 66990.0, 1.0, 1001.0)
+        assert bot.pending_order is not None
+
+        # Tick 3: цена поднимается до 67003 — fill!
+        pop.process_signals(_neutral_signal_values(), 67003.0, 1.0, 1002.0)
+        assert bot.pending_order is None
+        assert bot.engine.position is not None
+        assert bot.engine.position.entry_price == 67003.0
+        assert bot.engine.position.side.value == "SHORT"
 
     @pytest.mark.asyncio
     async def test_pending_order_timeout(self) -> None:

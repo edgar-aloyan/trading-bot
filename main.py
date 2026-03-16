@@ -182,7 +182,13 @@ class TradingBot:
         # Каждый бот обрабатывает сигналы
         bot_signals = pop.process_signals(values, current_price, spread, now)
 
-        # Записываем новые pending orders в DB (maker mode)
+        # Сначала удаляем исполненные/отменённые pending orders
+        if pop.last_removed_order_ids:
+            await self._db.delete_pending_orders_batch(
+                pop.last_removed_order_ids, population_id=pid,
+            )
+
+        # Затем записываем новые pending orders (maker mode)
         if pop.last_pending_orders:
             orders = [
                 OrderRow(
@@ -196,12 +202,6 @@ class TradingBot:
                 for po in pop.last_pending_orders
             ]
             await self._db.save_pending_orders_batch(orders, population_id=pid)
-
-        # Удаляем исполненные/отменённые pending orders из DB
-        if pop.last_removed_order_ids:
-            await self._db.delete_pending_orders_batch(
-                pop.last_removed_order_ids, population_id=pid,
-            )
 
         # Записываем открытые позиции в DB (батчом)
         if pop.last_opened_positions:
