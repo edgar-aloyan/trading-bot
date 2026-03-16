@@ -88,8 +88,6 @@ CREATE TABLE IF NOT EXISTS evolutions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_bot_gen ON trades (bot_id, generation);
-CREATE INDEX IF NOT EXISTS idx_trades_pop_bot_gen ON trades (population_id, bot_id, generation);
-CREATE INDEX IF NOT EXISTS idx_bots_pop ON bots (population_id);
 
 SELECT create_hypertable('trades', 'created_at', if_not_exists => TRUE);
 """
