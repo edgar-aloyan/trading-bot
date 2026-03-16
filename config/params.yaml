@@ -62,3 +62,7 @@ voting:
 experiments:
   - population_id: 1
     name: "control"
+    mode: "taker"
+  - population_id: 2
+    name: "maker"
+    mode: "maker"
