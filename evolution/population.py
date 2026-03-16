@@ -3,6 +3,10 @@
 Stateless: всё состояние в PostgreSQL (StateDB).
 В памяти только кэш для быстрого tick processing (позиции, params, balance).
 При каждом изменении состояния — запись в DB из main.py.
+
+Поддерживает два режима:
+- taker (default): мгновенное исполнение, taker fees
+- maker: лимитные ордера на вход, maker fees при fill
 """
 
 from __future__ import annotations
@@ -13,7 +17,14 @@ from dataclasses import dataclass
 from core.decision import BotParams, DecisionEngine, FilterConfig, Position
 from core.signals import Signal, SignalValues
 from evolution.fitness import FitnessConfig, TradeRecord, compute_fitness
-from evolution.genetics import GeneticsConfig, evolve, random_params
+from evolution.genetics import (
+    MAKER_PARAM_RANGES,
+    PARAM_RANGES,
+    GeneticsConfig,
+    ParamRange,
+    evolve,
+    random_params,
+)
 from paper.simulator import PaperTradingConfig
 from storage.database import BotRow, StateDBProtocol
 
@@ -34,6 +45,7 @@ class Bot:
     generation: int = 0
     balance: float = 0.0
     entry_signals: dict[str, object] | None = None
+    pending_order: PendingOrder | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -70,15 +82,38 @@ class OpenedPosition:
     signals: dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class PendingOrder:
+    """Лимитный ордер ожидающий fill — in-memory state."""
+
+    bot_id: int
+    side: str
+    limit_price: float
+    placed_time: float
+    size_usd: float
+    signals: dict[str, object]
+
+
 # ---------------------------------------------------------------------------
-# Population
+# Param name sets per mode
 # ---------------------------------------------------------------------------
 
-# Имена параметров BotParams — для сериализации
-PARAM_NAMES = (
+TAKER_PARAM_NAMES = (
     "imbalance_threshold", "flow_threshold", "take_profit_usd",
     "stop_loss_usd", "max_hold_seconds", "eth_move_threshold", "leader_weight",
 )
+
+MAKER_PARAM_NAMES = TAKER_PARAM_NAMES + (
+    "limit_offset_usd", "cancel_timeout_seconds", "exit_order_mode",
+)
+
+# Обратная совместимость
+PARAM_NAMES = TAKER_PARAM_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Population
+# ---------------------------------------------------------------------------
 
 
 class Population:
@@ -96,9 +131,11 @@ class Population:
         db: StateDBProtocol,
         *,
         population_id: int = 1,
+        mode: str = "taker",
     ) -> None:
         self._size = size
         self._population_id = population_id
+        self._mode = mode
         self._paper_config = paper_config
         self._fitness_config = fitness_config
         self._genetics_config = genetics_config
@@ -106,6 +143,14 @@ class Population:
         self._min_trades_per_bot = min_trades_per_bot
         self._evolution_ready_ratio = evolution_ready_ratio
         self._db = db
+
+        # Параметры зависят от режима
+        self._param_ranges: dict[str, ParamRange] = (
+            MAKER_PARAM_RANGES if mode == "maker" else PARAM_RANGES
+        )
+        self._param_names: tuple[str, ...] = (
+            MAKER_PARAM_NAMES if mode == "maker" else TAKER_PARAM_NAMES
+        )
 
         # In-memory кэш — заполняется в init_from_db()
         self.bots: list[Bot] = []
@@ -117,6 +162,8 @@ class Population:
         # Результаты последнего tick — main.py читает и пишет в DB
         self.last_closed_trades: list[ClosedTrade] = []
         self.last_opened_positions: list[OpenedPosition] = []
+        self.last_pending_orders: list[PendingOrder] = []
+        self.last_removed_order_ids: list[int] = []
 
     async def init_from_db(self) -> None:
         """Загружает состояние из DB или создаёт новую популяцию."""
@@ -167,6 +214,25 @@ class Population:
                     pos.bot_id, pos.side, pos.entry_price,
                 )
 
+        # Восстанавливаем pending orders из DB (maker mode)
+        if self._mode == "maker":
+            orders = await self._db.load_pending_orders(population_id=pid)
+            for order in orders:
+                found = self._find_bot(order.bot_id)
+                if found is not None:
+                    found.pending_order = PendingOrder(
+                        bot_id=order.bot_id,
+                        side=order.side,
+                        limit_price=order.limit_price,
+                        placed_time=order.placed_time,
+                        size_usd=order.size_usd,
+                        signals=order.entry_signals or {},
+                    )
+                    logger.info(
+                        "Restored pending order for bot %d: %s @ %.2f",
+                        order.bot_id, order.side, order.limit_price,
+                    )
+
     def process_signals(
         self, values: SignalValues, current_price: float, spread: float, now: float,
     ) -> list[tuple[int, Signal]]:
@@ -175,9 +241,13 @@ class Population:
         Побочные эффекты доступны через:
         - self.last_closed_trades (закрытые сделки)
         - self.last_opened_positions (открытые позиции)
+        - self.last_pending_orders (новые ордера, maker mode)
+        - self.last_removed_order_ids (заполненные/отменённые ордера)
         """
         self.last_closed_trades = []
         self.last_opened_positions = []
+        self.last_pending_orders = []
+        self.last_removed_order_ids = []
         results: list[tuple[int, Signal]] = []
 
         for bot in self.bots:
@@ -216,12 +286,16 @@ class Population:
             ))
 
         params_list = [bot.params for bot in self.bots]
-        new_params = evolve(params_list, scores, self._genetics_config)
+        new_params = evolve(
+            params_list, scores, self._genetics_config, self._param_ranges,
+        )
 
         best_idx = scores.index(max(scores)) if scores else 0
         avg_fitness = sum(scores) / len(scores) if scores else 0.0
         best_bot = self.bots[best_idx]
-        best_params = {k: getattr(best_bot.params, k) for k in PARAM_NAMES}
+        best_params = {
+            k: getattr(best_bot.params, k) for k in self._param_names
+        }
 
         new_generation = self._generation + 1
 
@@ -239,10 +313,10 @@ class Population:
             new_bot_rows.append(BotRow(
                 bot_id=i,
                 generation=new_generation,
-                params={k: getattr(params, k) for k in PARAM_NAMES},
+                params={k: getattr(params, k) for k in self._param_names},
             ))
 
-        # Атомарная запись в DB
+        # Атомарная запись в DB (включая очистку pending_orders)
         await self._db.run_evolution_tx(
             generation=new_generation,
             total_trades=0,
@@ -286,6 +360,10 @@ class Population:
     def total_trades(self) -> int:
         return self._total_trades
 
+    @property
+    def mode(self) -> str:
+        return self._mode
+
     # ----- internal -----
 
     def _process_bot(
@@ -299,58 +377,164 @@ class Population:
         """Обрабатывает один тик для одного бота."""
         engine = bot.engine
 
+        # Maker mode: проверяем pending order (fill / timeout)
+        if bot.pending_order is not None:
+            return self._process_pending_order(bot, current_price, now)
+
         # Проверяем выход из позиции
         if engine.position is not None and engine.should_exit(current_price, now):
-            pos = engine.position
-            pnl = engine.close_position(current_price)
-            fees = self._compute_fees(spread, current_price)
-            # PnL уже не включает fees — вычитаем отдельно
-            net_pnl = pnl - fees
-            self.last_closed_trades.append(ClosedTrade(
-                bot_id=bot.bot_id,
-                generation=bot.generation,
-                side=pos.side.value,
-                entry_price=pos.entry_price,
-                exit_price=current_price,
-                pnl=net_pnl,
-                fees=fees,
-                entry_time=pos.entry_time,
-                exit_time=now,
-                entry_signals=bot.entry_signals,
-                exit_signals=_values_to_dict(values),
-            ))
-            bot.entry_signals = None
-            return Signal.HOLD
+            return self._close_position(
+                bot, engine, values, current_price, spread, now,
+            )
 
         # Проверяем вход
         if engine.position is None:
-            # Проверяем что баланс позволяет открыть позицию
-            if bot.balance < self._paper_config.position_size_usd:
-                return Signal.HOLD
-
-            signal = engine.compute_entry_signal(values, current_price, now)
-            if signal != Signal.HOLD:
-                engine.open_position(
-                    signal, current_price, now,
-                    size_usd=self._paper_config.position_size_usd,
-                )
-                signals_dict = _values_to_dict(values)
-                bot.entry_signals = signals_dict
-                self.last_opened_positions.append(OpenedPosition(
-                    bot_id=bot.bot_id,
-                    side=signal.value,
-                    entry_price=current_price,
-                    entry_time=now,
-                    size_usd=self._paper_config.position_size_usd,
-                    signals=signals_dict,
-                ))
-            return signal
+            return self._try_entry(
+                bot, engine, values, current_price, spread, now,
+            )
 
         return Signal.HOLD
 
-    def _compute_fees(self, spread: float, price: float) -> float:
-        """Комиссия: taker fee + slippage."""
+    def _process_pending_order(
+        self, bot: Bot, current_price: float, now: float,
+    ) -> Signal:
+        """Проверяет fill или timeout для pending order."""
+        order = bot.pending_order
+        assert order is not None
+
+        # Проверяем fill: цена дошла до лимита
+        filled = (
+            (order.side == "LONG" and current_price <= order.limit_price)
+            or (order.side == "SHORT" and current_price >= order.limit_price)
+        )
+
+        if filled:
+            # Ордер исполнен — открываем позицию по лимитной цене
+            signal = Signal(order.side)
+            bot.engine.open_position(
+                signal, order.limit_price, now,
+                size_usd=order.size_usd,
+            )
+            bot.entry_signals = order.signals
+            self.last_opened_positions.append(OpenedPosition(
+                bot_id=bot.bot_id,
+                side=order.side,
+                entry_price=order.limit_price,
+                entry_time=now,
+                size_usd=order.size_usd,
+                signals=order.signals,
+            ))
+            bot.pending_order = None
+            self.last_removed_order_ids.append(bot.bot_id)
+            return Signal.HOLD
+
+        # Проверяем timeout
+        if now - order.placed_time >= bot.params.cancel_timeout_seconds:
+            bot.pending_order = None
+            self.last_removed_order_ids.append(bot.bot_id)
+
+        return Signal.HOLD
+
+    def _close_position(
+        self,
+        bot: Bot,
+        engine: DecisionEngine,
+        values: SignalValues,
+        current_price: float,
+        spread: float,
+        now: float,
+    ) -> Signal:
+        """Закрывает позицию бота с правильным расчётом fees."""
+        pos = engine.position
+        assert pos is not None
+
+        # Определяем тип выхода для расчёта fees
+        is_maker_tp = False
+        if self._mode == "maker" and bot.params.exit_order_mode > 0.5:
+            # TP exit с maker fee — если PnL достигает take_profit
+            unrealized = engine._unrealized_pnl(current_price)
+            if unrealized >= bot.params.take_profit_usd:
+                is_maker_tp = True
+
+        pnl = engine.close_position(current_price)
+        fees = self._compute_fees(spread, current_price, maker=is_maker_tp)
+        net_pnl = pnl - fees
+        self.last_closed_trades.append(ClosedTrade(
+            bot_id=bot.bot_id,
+            generation=bot.generation,
+            side=pos.side.value,
+            entry_price=pos.entry_price,
+            exit_price=current_price,
+            pnl=net_pnl,
+            fees=fees,
+            entry_time=pos.entry_time,
+            exit_time=now,
+            entry_signals=bot.entry_signals,
+            exit_signals=_values_to_dict(values),
+        ))
+        bot.entry_signals = None
+        return Signal.HOLD
+
+    def _try_entry(
+        self,
+        bot: Bot,
+        engine: DecisionEngine,
+        values: SignalValues,
+        current_price: float,
+        spread: float,
+        now: float,
+    ) -> Signal:
+        """Пробует открыть позицию или поставить лимитный ордер."""
+        if bot.balance < self._paper_config.position_size_usd:
+            return Signal.HOLD
+
+        signal = engine.compute_entry_signal(values, current_price, now)
+        if signal == Signal.HOLD:
+            return Signal.HOLD
+
+        signals_dict = _values_to_dict(values)
+        size_usd = self._paper_config.position_size_usd
+
+        if self._mode == "maker":
+            # Maker mode: ставим лимитный ордер с отступом от цены
+            offset = bot.params.limit_offset_usd
+            if signal == Signal.LONG:
+                limit_price = current_price - offset
+            else:
+                limit_price = current_price + offset
+
+            pending = PendingOrder(
+                bot_id=bot.bot_id,
+                side=signal.value,
+                limit_price=limit_price,
+                placed_time=now,
+                size_usd=size_usd,
+                signals=signals_dict,
+            )
+            bot.pending_order = pending
+            self.last_pending_orders.append(pending)
+        else:
+            # Taker mode: мгновенное исполнение
+            engine.open_position(signal, current_price, now, size_usd=size_usd)
+            bot.entry_signals = signals_dict
+            self.last_opened_positions.append(OpenedPosition(
+                bot_id=bot.bot_id,
+                side=signal.value,
+                entry_price=current_price,
+                entry_time=now,
+                size_usd=size_usd,
+                signals=signals_dict,
+            ))
+
+        return signal
+
+    def _compute_fees(
+        self, spread: float, price: float, *, maker: bool = False,
+    ) -> float:
+        """Комиссия: maker fee (без slippage) или taker fee + slippage."""
         cfg = self._paper_config
+        if maker:
+            return cfg.position_size_usd * cfg.maker_fee
         slippage_usd = cfg.slippage_factor * spread
         slippage_pct = slippage_usd / price if price > 0 else 0.0
         return cfg.position_size_usd * (cfg.taker_fee + slippage_pct)
@@ -358,7 +542,7 @@ class Population:
     def _create_new_bots(self, size: int) -> list[Bot]:
         bots: list[Bot] = []
         for i in range(size):
-            params = random_params()
+            params = random_params(self._param_ranges)
             bots.append(Bot(
                 bot_id=i,
                 params=params,
@@ -372,8 +556,12 @@ class Population:
         bots: list[Bot] = []
         for row in rows:
             # params хранятся как JSONB — значения всегда float
+            # .get() для совместимости со старыми записями без maker params
             raw = row.params
-            params = BotParams(**{k: float(str(raw[k])) for k in PARAM_NAMES})
+            params = BotParams(**{
+                k: float(str(raw[k])) if k in raw else 0.0
+                for k in self._param_names
+            })
             bots.append(Bot(
                 bot_id=row.bot_id,
                 params=params,
@@ -387,7 +575,7 @@ class Population:
             BotRow(
                 bot_id=b.bot_id,
                 generation=b.generation,
-                params={k: getattr(b.params, k) for k in PARAM_NAMES},
+                params={k: getattr(b.params, k) for k in self._param_names},
             )
             for b in self.bots
         ], population_id=self._population_id)

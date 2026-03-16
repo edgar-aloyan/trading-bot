@@ -48,6 +48,17 @@ CREATE TABLE IF NOT EXISTS positions (
     PRIMARY KEY (population_id, bot_id)
 );
 
+CREATE TABLE IF NOT EXISTS pending_orders (
+    population_id  INT NOT NULL DEFAULT 1,
+    bot_id         INT NOT NULL,
+    side           TEXT NOT NULL,
+    limit_price    DOUBLE PRECISION NOT NULL,
+    placed_time    DOUBLE PRECISION NOT NULL,
+    size_usd       DOUBLE PRECISION NOT NULL,
+    entry_signals  JSONB,
+    PRIMARY KEY (population_id, bot_id)
+);
+
 CREATE TABLE IF NOT EXISTS trades (
     id             SERIAL,
     population_id  INT NOT NULL DEFAULT 1,
@@ -159,6 +170,18 @@ class PositionRow:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderRow:
+    """Pending (лимитный) ордер из БД."""
+
+    bot_id: int
+    side: str
+    limit_price: float
+    placed_time: float
+    size_usd: float
+    entry_signals: dict[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TradeRow:
     """Закрытая сделка из БД."""
 
@@ -211,6 +234,15 @@ class StateDBProtocol(Protocol):
     async def load_positions(
         self, *, population_id: int = 1,
     ) -> list[PositionRow]: ...
+    async def save_pending_orders_batch(
+        self, orders: list[OrderRow], *, population_id: int = 1,
+    ) -> None: ...
+    async def load_pending_orders(
+        self, *, population_id: int = 1,
+    ) -> list[OrderRow]: ...
+    async def delete_pending_orders_batch(
+        self, bot_ids: list[int], *, population_id: int = 1,
+    ) -> None: ...
     async def close_trade(
         self, trade: TradeRow, *, population_id: int = 1,
     ) -> int: ...
@@ -436,6 +468,60 @@ class StateDB:
                 for r in rows
             ]
 
+    # ---- pending orders ----
+
+    async def save_pending_orders_batch(
+        self, orders: list[OrderRow], *, population_id: int = 1,
+    ) -> None:
+        """Батч-запись pending orders в одной транзакции."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            for order in orders:
+                await conn.execute(
+                    "INSERT INTO pending_orders "
+                    "(population_id, bot_id, side, limit_price, placed_time, "
+                    "size_usd, entry_signals) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) "
+                    "ON CONFLICT (population_id, bot_id) DO UPDATE SET "
+                    "side=$3, limit_price=$4, placed_time=$5, "
+                    "size_usd=$6, entry_signals=$7::jsonb",
+                    population_id, order.bot_id, order.side,
+                    order.limit_price, order.placed_time,
+                    order.size_usd, _to_json(order.entry_signals),
+                )
+
+    async def load_pending_orders(
+        self, *, population_id: int = 1,
+    ) -> list[OrderRow]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT bot_id, side, limit_price, placed_time, size_usd, "
+                "entry_signals FROM pending_orders WHERE population_id = $1",
+                population_id,
+            )
+            return [
+                OrderRow(
+                    bot_id=int(r["bot_id"]),
+                    side=str(r["side"]),
+                    limit_price=float(r["limit_price"]),
+                    placed_time=float(r["placed_time"]),
+                    size_usd=float(r["size_usd"]),
+                    entry_signals=_parse_signals(r["entry_signals"]),
+                )
+                for r in rows
+            ]
+
+    async def delete_pending_orders_batch(
+        self, bot_ids: list[int], *, population_id: int = 1,
+    ) -> None:
+        if not bot_ids:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM pending_orders "
+                "WHERE population_id = $1 AND bot_id = ANY($2::int[])",
+                population_id, bot_ids,
+            )
+
     # ---- trades ----
 
     async def close_trade(
@@ -594,6 +680,10 @@ class StateDB:
             )
             await conn.execute(
                 "DELETE FROM positions WHERE population_id = $1", population_id,
+            )
+            await conn.execute(
+                "DELETE FROM pending_orders WHERE population_id = $1",
+                population_id,
             )
             await conn.execute(
                 "UPDATE population SET generation = $1, total_trades = $2 "

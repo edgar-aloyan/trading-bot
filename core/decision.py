@@ -28,6 +28,10 @@ class BotParams:
     max_hold_seconds: float  # макс. время удержания (10–120)
     eth_move_threshold: float  # порог движения ETH (0.01%–0.05%)
     leader_weight: float  # вес поводырей (0.0–1.0)
+    # Maker order params — defaults encode taker behavior
+    limit_offset_usd: float = 0.0  # отступ от цены для лимитной заявки (0 → taker)
+    cancel_timeout_seconds: float = 0.0  # таймаут отмены незаполненного ордера
+    exit_order_mode: float = 0.0  # >0.5 → TP exit с maker fee (без slippage)
 
 
 # ---------------------------------------------------------------------------

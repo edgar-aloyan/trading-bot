@@ -25,7 +25,7 @@ from evolution.fitness import FitnessConfig
 from evolution.genetics import GeneticsConfig
 from evolution.population import Population
 from paper.simulator import PaperTradingConfig
-from storage.database import PositionRow, StateDB, StateDBProtocol, TradeRow
+from storage.database import OrderRow, PositionRow, StateDB, StateDBProtocol, TradeRow
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ class TradingBot:
         for exp in self._experiments:
             pop_id = int(str(exp.get("population_id", 1)))
             pop_name = str(exp.get("name", f"pop-{pop_id}"))
+            pop_mode = str(exp.get("mode", "taker"))
             pop = Population(
                 size=self._pop_size,
                 paper_config=self._paper_config,
@@ -87,12 +88,13 @@ class TradingBot:
                 filter_config=self._filter_config,
                 db=self._db,
                 population_id=pop_id,
+                mode=pop_mode,
             )
             await pop.init_from_db()
             self._populations.append(pop)
             logger.info(
-                "Population '%s' (id=%d) ready: %d bots, generation=%d",
-                pop_name, pop_id, len(pop.bots), pop.generation,
+                "Population '%s' (id=%d, mode=%s) ready: %d bots, generation=%d",
+                pop_name, pop_id, pop_mode, len(pop.bots), pop.generation,
             )
 
     # Обратная совместимость: тесты используют _init_population / _population
@@ -179,6 +181,27 @@ class TradingBot:
 
         # Каждый бот обрабатывает сигналы
         bot_signals = pop.process_signals(values, current_price, spread, now)
+
+        # Записываем новые pending orders в DB (maker mode)
+        if pop.last_pending_orders:
+            orders = [
+                OrderRow(
+                    bot_id=po.bot_id,
+                    side=po.side,
+                    limit_price=po.limit_price,
+                    placed_time=po.placed_time,
+                    size_usd=po.size_usd,
+                    entry_signals=po.signals,
+                )
+                for po in pop.last_pending_orders
+            ]
+            await self._db.save_pending_orders_batch(orders, population_id=pid)
+
+        # Удаляем исполненные/отменённые pending orders из DB
+        if pop.last_removed_order_ids:
+            await self._db.delete_pending_orders_batch(
+                pop.last_removed_order_ids, population_id=pid,
+            )
 
         # Записываем открытые позиции в DB (батчом)
         if pop.last_opened_positions:

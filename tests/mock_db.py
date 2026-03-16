@@ -6,7 +6,7 @@ Default population_id=1 для обратной совместимости с с
 
 from __future__ import annotations
 
-from storage.database import BotRow, PositionRow, TradeRow
+from storage.database import BotRow, OrderRow, PositionRow, TradeRow
 
 
 class MockStateDB:
@@ -17,6 +17,7 @@ class MockStateDB:
         self._generations: dict[int, tuple[int, int]] = {}  # pop_id -> (gen, total)
         self._bots: dict[int, list[BotRow]] = {}  # pop_id -> bots
         self._positions: dict[int, dict[int, PositionRow]] = {}  # pop_id -> {bot_id: pos}
+        self._pending_orders: dict[int, dict[int, OrderRow]] = {}  # pop_id -> {bot_id: order}
         self._trades: dict[int, list[TradeRow]] = {}  # pop_id -> trades
         self._evolutions: dict[int, list[dict[str, object]]] = {}  # pop_id -> records
 
@@ -34,6 +35,8 @@ class MockStateDB:
             self._bots[population_id] = []
         if population_id not in self._positions:
             self._positions[population_id] = {}
+        if population_id not in self._pending_orders:
+            self._pending_orders[population_id] = {}
         if population_id not in self._trades:
             self._trades[population_id] = []
         if population_id not in self._evolutions:
@@ -87,6 +90,26 @@ class MockStateDB:
     ) -> list[PositionRow]:
         self._ensure_pop(population_id)
         return list(self._positions[population_id].values())
+
+    async def save_pending_orders_batch(
+        self, orders: list[OrderRow], *, population_id: int = 1,
+    ) -> None:
+        self._ensure_pop(population_id)
+        for order in orders:
+            self._pending_orders[population_id][order.bot_id] = order
+
+    async def load_pending_orders(
+        self, *, population_id: int = 1,
+    ) -> list[OrderRow]:
+        self._ensure_pop(population_id)
+        return list(self._pending_orders[population_id].values())
+
+    async def delete_pending_orders_batch(
+        self, bot_ids: list[int], *, population_id: int = 1,
+    ) -> None:
+        self._ensure_pop(population_id)
+        for bot_id in bot_ids:
+            self._pending_orders[population_id].pop(bot_id, None)
 
     async def close_trade(
         self, trade: TradeRow, *, population_id: int = 1,
@@ -186,4 +209,5 @@ class MockStateDB:
         )
         self._bots[population_id] = list(bots)
         self._positions[population_id].clear()
+        self._pending_orders[population_id].clear()
         self._generations[population_id] = (generation, total_trades)

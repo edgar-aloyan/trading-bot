@@ -24,7 +24,7 @@ class ParamRange:
     max_val: float
 
 
-# Диапазоны из SPEC.md
+# Диапазоны из SPEC.md — базовые параметры (taker)
 PARAM_RANGES: dict[str, ParamRange] = {
     "imbalance_threshold": ParamRange(0.55, 0.85),
     "flow_threshold": ParamRange(1.2, 3.0),
@@ -33,6 +33,14 @@ PARAM_RANGES: dict[str, ParamRange] = {
     "max_hold_seconds": ParamRange(10.0, 300.0),
     "eth_move_threshold": ParamRange(0.0001, 0.0005),
     "leader_weight": ParamRange(0.0, 1.0),
+}
+
+# Расширенные диапазоны для maker-популяций
+MAKER_PARAM_RANGES: dict[str, ParamRange] = {
+    **PARAM_RANGES,
+    "limit_offset_usd": ParamRange(0.5, 5.0),
+    "cancel_timeout_seconds": ParamRange(5.0, 60.0),
+    "exit_order_mode": ParamRange(0.0, 1.0),
 }
 
 
@@ -74,24 +82,29 @@ class GeneticsConfig:
 # ---------------------------------------------------------------------------
 
 
-def random_params() -> BotParams:
+def random_params(
+    param_ranges: dict[str, ParamRange] | None = None,
+) -> BotParams:
     """Генерирует случайные параметры бота в допустимых диапазонах."""
+    ranges = param_ranges if param_ranges is not None else PARAM_RANGES
     values: dict[str, float] = {}
-    for name, r in PARAM_RANGES.items():
+    for name, r in ranges.items():
         values[name] = random.uniform(r.min_val, r.max_val)
     return BotParams(**values)
 
 
 def crossover(
     parent_a: BotParams, parent_b: BotParams, alpha: float,
+    param_ranges: dict[str, ParamRange] | None = None,
 ) -> BotParams:
     """BLX-alpha crossover — ребёнок сэмплируется из расширенного диапазона.
 
     При alpha=0 — uniform в [min, max] родителей.
     При alpha=0.5 — может выйти на 50% за пределы родителей (exploration).
     """
+    ranges = param_ranges if param_ranges is not None else PARAM_RANGES
     values: dict[str, float] = {}
-    for name, r in PARAM_RANGES.items():
+    for name, r in ranges.items():
         val_a = getattr(parent_a, name)
         val_b = getattr(parent_b, name)
         lo = min(val_a, val_b)
@@ -102,14 +115,18 @@ def crossover(
     return BotParams(**values)
 
 
-def mutate(params: BotParams, config: GeneticsConfig) -> BotParams:
+def mutate(
+    params: BotParams, config: GeneticsConfig,
+    param_ranges: dict[str, ParamRange] | None = None,
+) -> BotParams:
     """Мутация параметров бота.
 
     Каждый параметр с вероятностью mutation_rate сдвигается
     на случайную величину в пределах mutation_strength от диапазона.
     """
+    ranges = param_ranges if param_ranges is not None else PARAM_RANGES
     values: dict[str, float] = {}
-    for name, r in PARAM_RANGES.items():
+    for name, r in ranges.items():
         val = getattr(params, name)
         if random.random() < config.mutation_rate:
             # Сдвиг пропорционален размеру диапазона
@@ -124,6 +141,7 @@ def evolve(
     population: list[BotParams],
     fitness_scores: list[float],
     config: GeneticsConfig,
+    param_ranges: dict[str, ParamRange] | None = None,
 ) -> list[BotParams]:
     """Один цикл эволюции:
 
@@ -155,13 +173,13 @@ def evolve(
     for _ in range(n_crossover):
         parent_a = _tournament_select(ranked, config.tournament_size)
         parent_b = _tournament_select(ranked, config.tournament_size)
-        child = crossover(parent_a, parent_b, config.crossover_alpha)
-        child = mutate(child, config)
+        child = crossover(parent_a, parent_b, config.crossover_alpha, param_ranges)
+        child = mutate(child, config, param_ranges)
         new_population.append(child)
 
     # Мутанты — полностью случайные (diversity injection)
     for _ in range(n_mutant):
-        new_population.append(random_params())
+        new_population.append(random_params(param_ranges))
 
     return new_population
 
