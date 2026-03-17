@@ -11,29 +11,28 @@ def _default_filters() -> FilterConfig:
         max_spread_usd=2.0,
         min_volatility=0.0001,
         max_volatility=0.01,
-        flow_weight=0.5,
+        delta_weight=0.5,
     )
 
 
 def _default_params() -> BotParams:
     return BotParams(
-        imbalance_threshold=0.65,
-        flow_threshold=1.5,
+        micro_price_threshold=0.0001,
+        delta_threshold=0.3,
         take_profit_usd=20.0,
         stop_loss_usd=10.0,
         max_hold_seconds=60.0,
-        eth_move_threshold=0.0003,
-        leader_weight=0.5,
+        basis_threshold=0.0001,
+        basis_weight=0.5,
     )
 
 
 def _neutral_values() -> SignalValues:
     """Нейтральные значения — не должны вызывать сигнал."""
     return SignalValues(
-        imbalance=0.5,
-        flow_ratio=1.0,
-        eth_lead=0.0,
-        btc_change=0.0,
+        micro_price_deviation=0.0,
+        volume_delta=0.0,
+        basis=0.0,
         funding_rate=0.0,
         spread=1.0,
         volatility=0.001,
@@ -51,13 +50,12 @@ class TestEntrySignal:
         signal = engine.compute_entry_signal(_neutral_values(), 67000.0, 1000.0)
         assert signal == Signal.HOLD
 
-    def test_strong_bid_imbalance_gives_long(self) -> None:
+    def test_strong_buy_pressure_gives_long(self) -> None:
         engine = DecisionEngine(_default_params(), _default_filters())
         values = SignalValues(
-            imbalance=0.80,  # выше порога 0.65
-            flow_ratio=2.0,  # выше порога 1.5
-            eth_lead=0.0,
-            btc_change=0.0,
+            micro_price_deviation=0.0005,  # выше порога 0.0001
+            volume_delta=0.6,  # выше порога 0.3
+            basis=0.0,
             funding_rate=0.0,
             spread=1.0,
             volatility=0.001,
@@ -65,13 +63,12 @@ class TestEntrySignal:
         signal = engine.compute_entry_signal(values, 67000.0, 1000.0)
         assert signal == Signal.LONG
 
-    def test_strong_ask_imbalance_gives_short(self) -> None:
+    def test_strong_sell_pressure_gives_short(self) -> None:
         engine = DecisionEngine(_default_params(), _default_filters())
         values = SignalValues(
-            imbalance=0.20,  # ниже (1 - 0.65) = 0.35
-            flow_ratio=0.5,  # ниже 1/1.5 ≈ 0.67
-            eth_lead=0.0,
-            btc_change=0.0,
+            micro_price_deviation=-0.0005,  # ниже -0.0001
+            volume_delta=-0.6,  # ниже -0.3
+            basis=0.0,
             funding_rate=0.0,
             spread=1.0,
             volatility=0.001,
@@ -154,10 +151,9 @@ class TestFilters:
     def _long_values(self, **kwargs: float) -> SignalValues:
         """Сильные значения для LONG, можно переопределить поля."""
         defaults: dict[str, float] = dict(
-            imbalance=0.80,
-            flow_ratio=2.0,
-            eth_lead=0.0,
-            btc_change=0.0,
+            micro_price_deviation=0.0005,
+            volume_delta=0.6,
+            basis=0.0,
             funding_rate=0.0,
             spread=1.0,
             volatility=0.001,

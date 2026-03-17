@@ -32,7 +32,7 @@ def _filter_config() -> FilterConfig:
         max_spread_usd=2.0,
         min_volatility=0.0001,
         max_volatility=0.01,
-        flow_weight=0.5,
+        delta_weight=0.5,
     )
 
 
@@ -51,10 +51,9 @@ def _genetics_config() -> GeneticsConfig:
 def _long_signal_values() -> SignalValues:
     """Значения, которые должны вызвать LONG у большинства ботов."""
     return SignalValues(
-        imbalance=0.90,
-        flow_ratio=5.0,
-        eth_lead=0.01,
-        btc_change=0.0,
+        micro_price_deviation=0.005,
+        volume_delta=0.9,
+        basis=0.001,
         funding_rate=0.0,
         spread=1.0,
         volatility=0.001,
@@ -64,10 +63,9 @@ def _long_signal_values() -> SignalValues:
 def _short_signal_values() -> SignalValues:
     """Значения, которые должны вызвать SHORT у большинства ботов."""
     return SignalValues(
-        imbalance=0.10,
-        flow_ratio=0.2,
-        eth_lead=-0.01,
-        btc_change=0.0,
+        micro_price_deviation=-0.005,
+        volume_delta=-0.9,
+        basis=-0.001,
         funding_rate=0.0,
         spread=1.0,
         volatility=0.001,
@@ -77,20 +75,36 @@ def _short_signal_values() -> SignalValues:
 def _neutral_signal_values() -> SignalValues:
     """Нейтральные сигналы — HOLD."""
     return SignalValues(
-        imbalance=0.50,
-        flow_ratio=1.0,
-        eth_lead=0.0,
-        btc_change=0.0,
+        micro_price_deviation=0.0,
+        volume_delta=0.0,
+        basis=0.0,
         funding_rate=0.0,
         spread=1.0,
         volatility=0.001,
     )
 
 
+def _maker_bot_params(**overrides: float) -> BotParams:
+    """Стандартные параметры maker-бота для тестов."""
+    defaults: dict[str, float] = dict(
+        micro_price_threshold=0.0001,
+        delta_threshold=0.1,
+        take_profit_usd=20.0,
+        stop_loss_usd=10.0,
+        max_hold_seconds=60.0,
+        basis_threshold=0.0001,
+        basis_weight=0.5,
+        limit_offset_usd=2.0,
+        cancel_timeout_seconds=30.0,
+        exit_order_mode=0.0,
+    )
+    defaults.update(overrides)
+    return BotParams(**defaults)
+
+
 async def _make_maker_pop(
     size: int = 5,
     min_trades: int = 3,
-    ready_ratio: float = 0.5,
 ) -> Population:
     db = MockStateDB()
     pop = Population(
@@ -99,7 +113,6 @@ async def _make_maker_pop(
         fitness_config=_fitness_config(),
         genetics_config=_genetics_config(),
         min_trades_per_bot=min_trades,
-        evolution_ready_ratio=ready_ratio,
         filter_config=_filter_config(),
         db=db,
         mode="maker",
@@ -136,19 +149,7 @@ class TestMakerPopulation:
         """Pending order заполняется когда цена достигает лимита."""
         pop = await _make_maker_pop(size=1)
         bot = pop.bots[0]
-        # Принудительно задаём params для предсказуемости
-        bot.params = BotParams(
-            imbalance_threshold=0.55,
-            flow_threshold=1.2,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
-            max_hold_seconds=60.0,
-            eth_move_threshold=0.0001,
-            leader_weight=0.5,
-            limit_offset_usd=2.0,
-            cancel_timeout_seconds=30.0,
-            exit_order_mode=0.0,
-        )
+        bot.params = _maker_bot_params(limit_offset_usd=2.0)
         bot.engine.params = bot.params
 
         # Tick 1: сильный LONG → создаёт pending buy at 66998
@@ -178,18 +179,7 @@ class TestMakerPopulation:
         """SHORT pending order заполняется когда цена поднимается до лимита."""
         pop = await _make_maker_pop(size=1)
         bot = pop.bots[0]
-        bot.params = BotParams(
-            imbalance_threshold=0.55,
-            flow_threshold=1.2,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
-            max_hold_seconds=60.0,
-            eth_move_threshold=0.0001,
-            leader_weight=0.5,
-            limit_offset_usd=3.0,
-            cancel_timeout_seconds=30.0,
-            exit_order_mode=0.0,
-        )
+        bot.params = _maker_bot_params(limit_offset_usd=3.0)
         bot.engine.params = bot.params
 
         # Tick 1: SHORT → pending sell at 67003
@@ -214,17 +204,8 @@ class TestMakerPopulation:
         """Pending order отменяется по timeout."""
         pop = await _make_maker_pop(size=1)
         bot = pop.bots[0]
-        bot.params = BotParams(
-            imbalance_threshold=0.55,
-            flow_threshold=1.2,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
-            max_hold_seconds=60.0,
-            eth_move_threshold=0.0001,
-            leader_weight=0.5,
-            limit_offset_usd=2.0,
-            cancel_timeout_seconds=10.0,
-            exit_order_mode=0.0,
+        bot.params = _maker_bot_params(
+            limit_offset_usd=2.0, cancel_timeout_seconds=10.0,
         )
         bot.engine.params = bot.params
 
@@ -248,17 +229,8 @@ class TestMakerPopulation:
         """TP exit с exit_order_mode > 0.5 использует maker fee."""
         pop = await _make_maker_pop(size=1)
         bot = pop.bots[0]
-        bot.params = BotParams(
-            imbalance_threshold=0.55,
-            flow_threshold=1.2,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
-            max_hold_seconds=60.0,
-            eth_move_threshold=0.0001,
-            leader_weight=0.5,
-            limit_offset_usd=2.0,
-            cancel_timeout_seconds=30.0,
-            exit_order_mode=0.8,  # maker TP exit
+        bot.params = _maker_bot_params(
+            limit_offset_usd=2.0, exit_order_mode=0.8,
         )
         bot.engine.params = bot.params
 
@@ -271,9 +243,6 @@ class TestMakerPopulation:
         assert bot.engine.position is not None
 
         # Tick 3: TP hit — price up enough для take_profit_usd=20
-        # PnL = (67050 - 66998) * (1000/66998) ≈ 0.776 — не enough
-        # Нужно price = entry + TP * entry / size = 66998 + 20 * 66998/1000
-        # = 66998 + 1339.96 = 68337.96
         tp_price = 66998.0 + 20.0 * (66998.0 / 1000.0)
         pop.process_signals(_neutral_signal_values(), tp_price + 1, 1.0, 1010.0)
         assert bot.engine.position is None
@@ -289,17 +258,8 @@ class TestMakerPopulation:
         """SL exit всегда использует taker fee, даже с exit_order_mode > 0.5."""
         pop = await _make_maker_pop(size=1)
         bot = pop.bots[0]
-        bot.params = BotParams(
-            imbalance_threshold=0.55,
-            flow_threshold=1.2,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
-            max_hold_seconds=60.0,
-            eth_move_threshold=0.0001,
-            leader_weight=0.5,
-            limit_offset_usd=2.0,
-            cancel_timeout_seconds=30.0,
-            exit_order_mode=0.8,
+        bot.params = _maker_bot_params(
+            limit_offset_usd=2.0, exit_order_mode=0.8,
         )
         bot.engine.params = bot.params
 
@@ -318,7 +278,6 @@ class TestMakerPopulation:
 
         trade = pop.last_closed_trades[0]
         # Taker fee: 1000 * (0.0006 + slippage)
-        # slippage = 0.5 * 1.0 / (sl_price - 1) > 0
         assert trade.fees > 1000.0 * 0.0001  # больше чем maker fee
 
 
@@ -362,7 +321,6 @@ class TestMakerDB:
             fitness_config=_fitness_config(),
             genetics_config=_genetics_config(),
             min_trades_per_bot=3,
-            evolution_ready_ratio=0.5,
             filter_config=_filter_config(),
             db=db,
             mode="maker",
@@ -370,18 +328,7 @@ class TestMakerDB:
         await pop.init_from_db()
 
         bot = pop.bots[0]
-        bot.params = BotParams(
-            imbalance_threshold=0.55,
-            flow_threshold=1.2,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
-            max_hold_seconds=60.0,
-            eth_move_threshold=0.0001,
-            leader_weight=0.5,
-            limit_offset_usd=2.0,
-            cancel_timeout_seconds=30.0,
-            exit_order_mode=0.0,
-        )
+        bot.params = _maker_bot_params(limit_offset_usd=2.0)
         bot.engine.params = bot.params
 
         # Создаём pending order

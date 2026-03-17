@@ -21,13 +21,13 @@ from core.signals import Signal, SignalValues
 class BotParams:
     """Параметры одного бота — мутируют при эволюции."""
 
-    imbalance_threshold: float  # порог дисбаланса стакана (0.55–0.85)
-    flow_threshold: float  # порог давления потока (1.2–3.0)
+    micro_price_threshold: float  # порог отклонения micro-price (0.00001–0.001)
+    delta_threshold: float  # порог volume delta (0.05–0.8)
     take_profit_usd: float  # тейк-профит ($8–$40)
     stop_loss_usd: float  # стоп-лосс ($5–$25)
     max_hold_seconds: float  # макс. время удержания (10–120)
-    eth_move_threshold: float  # порог движения ETH (0.01%–0.05%)
-    leader_weight: float  # вес поводырей (0.0–1.0)
+    basis_threshold: float  # порог perp-spot basis (0.00001–0.001)
+    basis_weight: float  # вес basis сигнала (0.0–1.0)
     # Maker order params — defaults encode taker behavior
     limit_offset_usd: float = 0.0  # отступ от цены для лимитной заявки (0 → taker)
     cancel_timeout_seconds: float = 0.0  # таймаут отмены незаполненного ордера
@@ -46,7 +46,7 @@ class FilterConfig:
     max_spread_usd: float
     min_volatility: float
     max_volatility: float
-    flow_weight: float  # вес flow сигнала в _compute_score (был hardcoded 0.5)
+    delta_weight: float  # вес volume delta сигнала в _compute_score
 
     @staticmethod
     def from_yaml(path: str) -> FilterConfig:
@@ -58,7 +58,7 @@ class FilterConfig:
             max_spread_usd=flt["max_spread_usd"],
             min_volatility=flt["min_volatility"],
             max_volatility=flt["max_volatility"],
-            flow_weight=float(sig["flow_weight"]),
+            delta_weight=float(sig["delta_weight"]),
         )
 
 
@@ -148,7 +148,7 @@ class DecisionEngine:
     # ----- internal -----
 
     def _pass_filters(self, values: SignalValues) -> bool:
-        """Фильтры по SPEC.md — не торговать когда рынок непригоден."""
+        """Фильтры — не торговать когда рынок непригоден."""
         f = self.filters
         # Спред слишком широкий — ликвидности нет
         if values.spread > f.max_spread_usd:
@@ -167,24 +167,24 @@ class DecisionEngine:
         params = self.params
         score = 0.0
 
-        # Order Book Imbalance: основной сигнал
-        if values.imbalance > params.imbalance_threshold:
-            score += values.imbalance - params.imbalance_threshold
-        elif values.imbalance < (1 - params.imbalance_threshold):
-            score -= (1 - params.imbalance_threshold) - values.imbalance
+        # Micro-price deviation: основной сигнал
+        # Положительное отклонение = покупательское давление → LONG
+        if values.micro_price_deviation > params.micro_price_threshold:
+            score += values.micro_price_deviation - params.micro_price_threshold
+        elif values.micro_price_deviation < -params.micro_price_threshold:
+            score += values.micro_price_deviation + params.micro_price_threshold
 
-        # Trade Flow: подтверждающий сигнал
-        fw = self.filters.flow_weight
-        if values.flow_ratio > params.flow_threshold:
-            score += (values.flow_ratio - params.flow_threshold) * fw
-        elif values.flow_ratio < (1 / params.flow_threshold):
-            score -= ((1 / params.flow_threshold) - values.flow_ratio) * fw
+        # Volume delta: подтверждающий сигнал
+        dw = self.filters.delta_weight
+        if values.volume_delta > params.delta_threshold:
+            score += (values.volume_delta - params.delta_threshold) * dw
+        elif values.volume_delta < -params.delta_threshold:
+            score += (values.volume_delta + params.delta_threshold) * dw
 
-        # ETH lead-lag: поводырь усиливает сигнал
-        if abs(values.eth_lead) > params.eth_move_threshold:
-            # ETH двигается а BTC ещё нет — усиливаем в направлении ETH
-            eth_signal = values.eth_lead - values.btc_change
-            score += eth_signal * params.leader_weight
+        # Perp-spot basis: sentiment сигнал
+        # Положительный basis (перп дороже спота) = бычий sentiment
+        if abs(values.basis) > params.basis_threshold:
+            score += values.basis * params.basis_weight
 
         return score
 

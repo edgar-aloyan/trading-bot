@@ -1,6 +1,10 @@
 """Вычисление сырых торговых сигналов из рыночных данных.
 
-Этот модуль отвечает только за числа — imbalance, flow, lead-lag и т.д.
+Три сигнала:
+1. Micro-price deviation — оценка fair price по best bid/ask
+2. Volume delta — нормализованный дисбаланс объёмов buy/sell
+3. Perp-spot basis — разница perpetual и spot цен
+
 Решения (LONG/SHORT/HOLD) принимает decision.py на основе порогов бота.
 """
 
@@ -35,10 +39,9 @@ class Signal(Enum):
 class SignalValues:
     """Сырые значения всех сигналов — без интерпретации."""
 
-    imbalance: float  # [0, 1] — доля bid в общем объёме топ-N уровней
-    flow_ratio: float  # buy_volume / sell_volume за окно
-    eth_lead: float  # % изменение ETH за окно
-    btc_change: float  # % изменение BTC за то же окно (для сравнения)
+    micro_price_deviation: float  # отклонение micro-price от mid, signed
+    volume_delta: float  # (buy_vol - sell_vol) / total_vol, [-1, 1]
+    basis: float  # (perp_price - spot_price) / spot_price, signed
     funding_rate: float  # текущий funding rate perpetual
     spread: float  # текущий спред в USD
     volatility: float  # стандартное отклонение доходностей за окно
@@ -53,9 +56,7 @@ class SignalValues:
 class SignalsConfig:
     """Параметры вычисления сигналов из params.yaml."""
 
-    orderbook_levels: int
     flow_window_seconds: int
-    eth_window_seconds: int
     volatility_window_seconds: int
 
     @staticmethod
@@ -65,9 +66,7 @@ class SignalsConfig:
         sig = raw["signals"]
         flt = raw["filters"]
         return SignalsConfig(
-            orderbook_levels=sig["orderbook_levels"],
             flow_window_seconds=sig["flow_window_seconds"],
-            eth_window_seconds=sig["eth_window_seconds"],
             volatility_window_seconds=flt["volatility_window_seconds"],
         )
 
@@ -91,21 +90,12 @@ class _PriceSample:
 class SignalComputer:
     """Вычисляет сырые значения сигналов из MarketSnapshot.
 
-    Хранит историю цен ETH и BTC для lead-lag и volatility.
+    Хранит историю цен BTC для volatility.
     Один экземпляр на всю систему — результат общий для всех ботов.
     """
 
     def __init__(self, config: SignalsConfig) -> None:
         self._config = config
-        # Максимальное окно — для очистки старых данных
-        max_window = max(
-            config.eth_window_seconds,
-            config.volatility_window_seconds,
-        )
-        self._max_window = max_window
-
-        self._btc_prices: deque[_PriceSample] = deque()
-        self._eth_prices: deque[_PriceSample] = deque()
         # Volatility рассчитывается по сэмплам раз в секунду, а не на каждый тик,
         # чтобы измерять рыночную волатильность, а не тиковый шум
         self._btc_vol_prices: deque[_PriceSample] = deque()
@@ -119,17 +109,14 @@ class SignalComputer:
         self._prune_history(now)
 
         return SignalValues(
-            imbalance=compute_imbalance(
-                snapshot.btc_book, self._config.orderbook_levels
+            micro_price_deviation=compute_micro_price_deviation(
+                snapshot.btc_book
             ),
-            flow_ratio=compute_trade_flow(
+            volume_delta=compute_volume_delta(
                 snapshot.recent_trades, self._config.flow_window_seconds, now
             ),
-            eth_lead=self._compute_price_change(
-                self._eth_prices, self._config.eth_window_seconds, now
-            ),
-            btc_change=self._compute_price_change(
-                self._btc_prices, self._config.eth_window_seconds, now
+            basis=compute_basis(
+                snapshot.btc_book.mid_price, snapshot.btc_perp.last_price
             ),
             funding_rate=snapshot.btc_perp.funding_rate,
             spread=snapshot.btc_book.spread,
@@ -140,44 +127,15 @@ class SignalComputer:
 
     def _record_prices(self, snapshot: MarketSnapshot, now: float) -> None:
         btc_mid = snapshot.btc_book.mid_price
-        if btc_mid > 0:
-            self._btc_prices.append(_PriceSample(btc_mid, now))
-            # Сэмплируем для volatility не чаще раза в секунду
-            if now - self._last_vol_sample_time >= 1.0:
-                self._btc_vol_prices.append(_PriceSample(btc_mid, now))
-                self._last_vol_sample_time = now
-
-        eth_mid = snapshot.eth_book.mid_price
-        if eth_mid > 0:
-            self._eth_prices.append(_PriceSample(eth_mid, now))
+        # Сэмплируем для volatility не чаще раза в секунду
+        if btc_mid > 0 and now - self._last_vol_sample_time >= 1.0:
+            self._btc_vol_prices.append(_PriceSample(btc_mid, now))
+            self._last_vol_sample_time = now
 
     def _prune_history(self, now: float) -> None:
-        cutoff = now - self._max_window
-        while self._btc_prices and self._btc_prices[0].timestamp < cutoff:
-            self._btc_prices.popleft()
-        while self._eth_prices and self._eth_prices[0].timestamp < cutoff:
-            self._eth_prices.popleft()
+        cutoff = now - self._config.volatility_window_seconds
         while self._btc_vol_prices and self._btc_vol_prices[0].timestamp < cutoff:
             self._btc_vol_prices.popleft()
-
-    @staticmethod
-    def _compute_price_change(
-        prices: deque[_PriceSample], window_seconds: int, now: float
-    ) -> float:
-        """Процентное изменение цены за последние window_seconds."""
-        if len(prices) < 2:
-            return 0.0
-        cutoff = now - window_seconds
-        # Находим самую старую цену в окне
-        oldest_in_window: _PriceSample | None = None
-        for sample in prices:
-            if sample.timestamp >= cutoff:
-                oldest_in_window = sample
-                break
-        if oldest_in_window is None or oldest_in_window.price == 0:
-            return 0.0
-        latest = prices[-1]
-        return (latest.price - oldest_in_window.price) / oldest_in_window.price
 
     def _compute_volatility(self, now: float) -> float:
         """Стандартное отклонение доходностей BTC за volatility_window.
@@ -210,26 +168,37 @@ class SignalComputer:
 # ---------------------------------------------------------------------------
 
 
-def compute_imbalance(book: OrderBook, levels: int) -> float:
-    """Order Book Imbalance: bid_vol / (bid_vol + ask_vol) для топ-N уровней.
+def compute_micro_price_deviation(book: OrderBook) -> float:
+    """Micro-price: оценка fair value по объёмам best bid/ask.
 
-    Возвращает значение в [0, 1].
-    > 0.5 — давление покупателей, < 0.5 — давление продавцов.
+    micro_price = (ask_price * bid_vol + bid_price * ask_vol) / (bid_vol + ask_vol)
+
+    Возвращает отклонение micro-price от mid-price, нормализованное к цене.
+    Положительное — покупательское давление, отрицательное — продавцы.
     """
-    bid_vol = sum(level.volume for level in book.bids[:levels])
-    ask_vol = sum(level.volume for level in book.asks[:levels])
-    total = bid_vol + ask_vol
-    if total == 0:
-        return 0.5
-    return bid_vol / total
+    if not book.bids or not book.asks:
+        return 0.0
+    best_bid = book.bids[0]
+    best_ask = book.asks[0]
+    total_vol = best_bid.volume + best_ask.volume
+    if total_vol == 0:
+        return 0.0
+    # Micro-price взвешивает цены ПРОТИВОПОЛОЖНЫМИ объёмами:
+    # большой bid_vol толкает fair price к ask (покупатели давят)
+    micro = (best_ask.price * best_bid.volume + best_bid.price * best_ask.volume) / total_vol
+    mid = book.mid_price
+    if mid == 0:
+        return 0.0
+    return (micro - mid) / mid
 
 
-def compute_trade_flow(
+def compute_volume_delta(
     trades: list[Trade], window_seconds: int, now: float
 ) -> float:
-    """Trade Flow: buy_volume / sell_volume за последние window_seconds.
+    """Normalized volume delta: (buy_vol - sell_vol) / total_vol.
 
-    Возвращает ratio >= 0. При отсутствии sell — возвращает buy_volume или 1.0.
+    Возвращает значение в [-1, 1]. Стабильнее чем ratio (не взрывается
+    при малых объёмах одной стороны).
     """
     cutoff = now - window_seconds
     buy_vol = 0.0
@@ -241,7 +210,18 @@ def compute_trade_flow(
             buy_vol += t.volume
         else:
             sell_vol += t.volume
-    if sell_vol == 0:
-        # Нет продаж — ограничиваем сверху чтобы не раздувать score
-        return min(buy_vol, 10.0) if buy_vol > 0 else 1.0
-    return buy_vol / sell_vol
+    total = buy_vol + sell_vol
+    if total == 0:
+        return 0.0
+    return (buy_vol - sell_vol) / total
+
+
+def compute_basis(spot_price: float, perp_price: float) -> float:
+    """Perp-spot basis: (perp - spot) / spot.
+
+    Положительный basis = perpetual торгуется с премией = бычий sentiment.
+    Отрицательный = медвежий.
+    """
+    if spot_price == 0 or perp_price == 0:
+        return 0.0
+    return (perp_price - spot_price) / spot_price

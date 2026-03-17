@@ -99,8 +99,8 @@ class PendingOrder:
 # ---------------------------------------------------------------------------
 
 TAKER_PARAM_NAMES = (
-    "imbalance_threshold", "flow_threshold", "take_profit_usd",
-    "stop_loss_usd", "max_hold_seconds", "eth_move_threshold", "leader_weight",
+    "micro_price_threshold", "delta_threshold", "take_profit_usd",
+    "stop_loss_usd", "max_hold_seconds", "basis_threshold", "basis_weight",
 )
 
 MAKER_PARAM_NAMES = TAKER_PARAM_NAMES + (
@@ -126,7 +126,6 @@ class Population:
         fitness_config: FitnessConfig,
         genetics_config: GeneticsConfig,
         min_trades_per_bot: int,
-        evolution_ready_ratio: float,
         filter_config: FilterConfig,
         db: StateDBProtocol,
         *,
@@ -141,7 +140,6 @@ class Population:
         self._genetics_config = genetics_config
         self._filter_config = filter_config
         self._min_trades_per_bot = min_trades_per_bot
-        self._evolution_ready_ratio = evolution_ready_ratio
         self._db = db
 
         # Параметры зависят от режима
@@ -259,15 +257,14 @@ class Population:
     def should_evolve(self) -> bool:
         """Пора ли запускать эволюцию.
 
-        Эволюция когда evolution_ready_ratio ботов набрали min_trades_per_bot.
+        Триггер: суммарное число сделок популяции >= size * min_trades_per_bot.
+        Не ждём пока каждый бот наторгует — fitness penalty (min_trades_for_full_fitness)
+        уже штрафует ботов с малым числом сделок пропорционально.
         """
         if not self.bots:
             return False
-        ready = sum(
-            1 for c in self._bot_trade_counts.values()
-            if c >= self._min_trades_per_bot
-        )
-        return ready >= len(self.bots) * self._evolution_ready_ratio
+        total = sum(self._bot_trade_counts.values())
+        return total >= len(self.bots) * self._min_trades_per_bot
 
     async def run_evolution(self) -> None:
         """Запуск цикла эволюции — читает trades из DB, эволюционирует, сохраняет."""
@@ -590,10 +587,9 @@ class Population:
 def _values_to_dict(values: SignalValues) -> dict[str, object]:
     """Конвертирует SignalValues в dict для JSONB."""
     return {
-        "imbalance": values.imbalance,
-        "flow_ratio": values.flow_ratio,
-        "eth_lead": values.eth_lead,
-        "btc_change": values.btc_change,
+        "micro_price_deviation": values.micro_price_deviation,
+        "volume_delta": values.volume_delta,
+        "basis": values.basis,
         "volatility": values.volatility,
         "spread": values.spread,
     }

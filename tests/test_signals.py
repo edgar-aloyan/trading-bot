@@ -14,68 +14,73 @@ from core.market_data import (
 from core.signals import (
     SignalComputer,
     SignalsConfig,
-    compute_imbalance,
-    compute_trade_flow,
+    compute_basis,
+    compute_micro_price_deviation,
+    compute_volume_delta,
 )
 
 # ---------------------------------------------------------------------------
-# compute_imbalance
+# compute_micro_price_deviation
 # ---------------------------------------------------------------------------
 
 
-class TestComputeImbalance:
+class TestComputeMicroPriceDeviation:
     def test_balanced_book(self) -> None:
+        """Равные объёмы на best bid/ask → deviation ≈ 0."""
         book = OrderBook(
             bids=[OrderBookLevel(100.0, 5.0)],
             asks=[OrderBookLevel(101.0, 5.0)],
         )
-        assert compute_imbalance(book, levels=10) == 0.5
+        assert abs(compute_micro_price_deviation(book)) < 1e-10
 
     def test_bid_heavy(self) -> None:
+        """Больше объёма на bid → micro-price выше mid → положительное отклонение."""
         book = OrderBook(
             bids=[OrderBookLevel(100.0, 8.0)],
             asks=[OrderBookLevel(101.0, 2.0)],
         )
-        assert compute_imbalance(book, levels=10) == 0.8
+        dev = compute_micro_price_deviation(book)
+        assert dev > 0
 
     def test_ask_heavy(self) -> None:
+        """Больше объёма на ask → micro-price ниже mid → отрицательное отклонение."""
         book = OrderBook(
             bids=[OrderBookLevel(100.0, 2.0)],
             asks=[OrderBookLevel(101.0, 8.0)],
         )
-        assert compute_imbalance(book, levels=10) == 0.2
+        dev = compute_micro_price_deviation(book)
+        assert dev < 0
 
     def test_empty_book(self) -> None:
         book = OrderBook()
-        assert compute_imbalance(book, levels=10) == 0.5
+        assert compute_micro_price_deviation(book) == 0.0
 
-    def test_respects_levels_limit(self) -> None:
-        """Должен учитывать только первые N уровней."""
+    def test_uses_only_best_level(self) -> None:
+        """Micro-price использует только best bid/ask, глубокие уровни игнорируются."""
         book = OrderBook(
             bids=[
-                OrderBookLevel(100.0, 1.0),
-                OrderBookLevel(99.0, 1.0),
-                OrderBookLevel(98.0, 100.0),  # не должен учитываться при levels=2
+                OrderBookLevel(100.0, 5.0),
+                OrderBookLevel(99.0, 100.0),  # не влияет
             ],
-            asks=[OrderBookLevel(101.0, 2.0)],
+            asks=[OrderBookLevel(101.0, 5.0)],
         )
-        # levels=2: bid_vol=2, ask_vol=2 → 0.5
-        assert compute_imbalance(book, levels=2) == 0.5
+        # С равными объёмами на best level — deviation ≈ 0
+        assert abs(compute_micro_price_deviation(book)) < 1e-10
 
 
 # ---------------------------------------------------------------------------
-# compute_trade_flow
+# compute_volume_delta
 # ---------------------------------------------------------------------------
 
 
-class TestComputeTradeFlow:
+class TestComputeVolumeDelta:
     def test_balanced_flow(self) -> None:
         now = time.time()
         trades = [
             Trade(100.0, 1.0, "buy", now - 1),
             Trade(100.0, 1.0, "sell", now - 1),
         ]
-        assert compute_trade_flow(trades, window_seconds=5, now=now) == 1.0
+        assert compute_volume_delta(trades, window_seconds=5, now=now) == 0.0
 
     def test_buy_dominant(self) -> None:
         now = time.time()
@@ -83,23 +88,24 @@ class TestComputeTradeFlow:
             Trade(100.0, 3.0, "buy", now - 1),
             Trade(100.0, 1.0, "sell", now - 1),
         ]
-        assert compute_trade_flow(trades, window_seconds=5, now=now) == 3.0
+        # (3-1)/(3+1) = 0.5
+        assert compute_volume_delta(trades, window_seconds=5, now=now) == 0.5
 
     def test_no_trades(self) -> None:
         now = time.time()
-        assert compute_trade_flow([], window_seconds=5, now=now) == 1.0
+        assert compute_volume_delta([], window_seconds=5, now=now) == 0.0
 
     def test_only_buys(self) -> None:
+        """Только покупки → delta = 1.0 (максимум)."""
         now = time.time()
         trades = [Trade(100.0, 5.0, "buy", now - 1)]
-        # Нет продаж — возвращаем объём покупок
-        assert compute_trade_flow(trades, window_seconds=5, now=now) == 5.0
+        assert compute_volume_delta(trades, window_seconds=5, now=now) == 1.0
 
-    def test_only_buys_capped(self) -> None:
-        """При отсутствии продаж — cap на 10.0 чтобы не раздувать score."""
+    def test_only_sells(self) -> None:
+        """Только продажи → delta = -1.0 (минимум)."""
         now = time.time()
-        trades = [Trade(100.0, 50.0, "buy", now - 1)]
-        assert compute_trade_flow(trades, window_seconds=5, now=now) == 10.0
+        trades = [Trade(100.0, 5.0, "sell", now - 1)]
+        assert compute_volume_delta(trades, window_seconds=5, now=now) == -1.0
 
     def test_old_trades_excluded(self) -> None:
         """Сделки старше окна не учитываются."""
@@ -108,8 +114,30 @@ class TestComputeTradeFlow:
             Trade(100.0, 10.0, "buy", now - 100),  # старая
             Trade(100.0, 1.0, "sell", now - 1),  # свежая
         ]
-        # Покупка за окном, только sell = 1.0 → buy_vol=0, sell_vol=1 → ratio=0
-        assert compute_trade_flow(trades, window_seconds=5, now=now) == 0.0
+        # Покупка за окном → delta = (0-1)/1 = -1.0
+        assert compute_volume_delta(trades, window_seconds=5, now=now) == -1.0
+
+
+# ---------------------------------------------------------------------------
+# compute_basis
+# ---------------------------------------------------------------------------
+
+
+class TestComputeBasis:
+    def test_positive_basis(self) -> None:
+        """Перп дороже спота → положительный basis."""
+        assert compute_basis(100.0, 100.1) > 0
+
+    def test_negative_basis(self) -> None:
+        """Перп дешевле спота → отрицательный basis."""
+        assert compute_basis(100.0, 99.9) < 0
+
+    def test_zero_prices(self) -> None:
+        assert compute_basis(0.0, 100.0) == 0.0
+        assert compute_basis(100.0, 0.0) == 0.0
+
+    def test_equal_prices(self) -> None:
+        assert compute_basis(100.0, 100.0) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -119,17 +147,15 @@ class TestComputeTradeFlow:
 
 def _make_config() -> SignalsConfig:
     return SignalsConfig(
-        orderbook_levels=10,
         flow_window_seconds=5,
-        eth_window_seconds=10,
         volatility_window_seconds=60,
     )
 
 
 def _make_snapshot(
     btc_mid: float = 67000.0,
-    eth_mid: float = 3500.0,
     spread: float = 1.0,
+    perp_price: float = 67000.0,
     ts: float = 0.0,
 ) -> MarketSnapshot:
     half_spread = spread / 2
@@ -138,11 +164,8 @@ def _make_snapshot(
             bids=[OrderBookLevel(btc_mid - half_spread, 5.0)],
             asks=[OrderBookLevel(btc_mid + half_spread, 5.0)],
         ),
-        eth_book=OrderBook(
-            bids=[OrderBookLevel(eth_mid - 0.5, 3.0)],
-            asks=[OrderBookLevel(eth_mid + 0.5, 3.0)],
-        ),
-        btc_perp=TickerInfo(funding_rate=0.0001),
+        eth_book=OrderBook(),
+        btc_perp=TickerInfo(funding_rate=0.0001, last_price=perp_price),
         recent_trades=[],
         timestamp=ts,
     )
@@ -154,25 +177,19 @@ class TestSignalComputer:
         snap = _make_snapshot(ts=1000.0)
         values = comp.update(snap)
 
-        assert values.imbalance == 0.5  # balanced book
-        assert values.flow_ratio == 1.0  # no trades
-        assert values.eth_lead == 0.0  # no history yet
+        assert abs(values.micro_price_deviation) < 1e-10  # balanced book
+        assert values.volume_delta == 0.0  # no trades
+        assert values.basis == 0.0  # perp == spot
         assert values.funding_rate == 0.0001
         assert values.spread == 1.0
 
-    def test_eth_lead_detection(self) -> None:
-        """ETH двигается, BTC нет — должен быть ненулевой eth_lead."""
+    def test_basis_detection(self) -> None:
+        """Perp торгуется с премией → положительный basis."""
         comp = SignalComputer(_make_config())
+        snap = _make_snapshot(btc_mid=67000, perp_price=67067, ts=1000.0)
+        values = comp.update(snap)
 
-        # Первый снимок
-        comp.update(_make_snapshot(btc_mid=67000, eth_mid=3500, ts=1000.0))
-
-        # Через 5 секунд ETH вырос на ~1%, BTC на месте
-        snap2 = _make_snapshot(btc_mid=67000, eth_mid=3535, ts=1005.0)
-        values = comp.update(snap2)
-
-        assert values.eth_lead > 0.009  # ~1%
-        assert abs(values.btc_change) < 0.001  # BTC не двигался
+        assert values.basis > 0.0009  # ~0.1%
 
     def test_volatility_calculation(self) -> None:
         """Волатильность должна быть > 0 при изменении цен."""
@@ -202,12 +219,8 @@ class TestSignalComputer:
         p.write_text(
             """
 signals:
-  orderbook_levels: 10
-  imbalance_threshold: 0.65
-  flow_threshold: 1.5
+  delta_weight: 0.5
   flow_window_seconds: 5
-  eth_window_seconds: 10
-  eth_move_threshold: 0.0003
   funding_positive_threshold: 0.0001
   funding_negative_threshold: -0.0001
 filters:
@@ -218,6 +231,5 @@ filters:
 """
         )
         cfg = SignalsConfig.from_yaml(str(p))
-        assert cfg.orderbook_levels == 10
         assert cfg.flow_window_seconds == 5
         assert cfg.volatility_window_seconds == 60

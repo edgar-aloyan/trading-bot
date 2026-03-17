@@ -34,7 +34,7 @@ def _filter_config() -> FilterConfig:
         max_spread_usd=2.0,
         min_volatility=0.0001,
         max_volatility=0.01,
-        flow_weight=0.5,
+        delta_weight=0.5,
     )
 
 
@@ -53,10 +53,9 @@ def _genetics_config() -> GeneticsConfig:
 def _long_signal_values() -> SignalValues:
     """Значения, которые должны вызвать LONG у большинства ботов."""
     return SignalValues(
-        imbalance=0.90,
-        flow_ratio=5.0,
-        eth_lead=0.01,
-        btc_change=0.0,
+        micro_price_deviation=0.005,
+        volume_delta=0.9,
+        basis=0.001,
         funding_rate=0.0,
         spread=1.0,
         volatility=0.001,
@@ -66,7 +65,6 @@ def _long_signal_values() -> SignalValues:
 async def _make_pop(
     size: int = 5,
     min_trades: int = 3,
-    ready_ratio: float = 0.5,
 ) -> Population:
     db = MockStateDB()
     pop = Population(
@@ -75,7 +73,6 @@ async def _make_pop(
         fitness_config=_fitness_config(),
         genetics_config=_genetics_config(),
         min_trades_per_bot=min_trades,
-        evolution_ready_ratio=ready_ratio,
         filter_config=_filter_config(),
         db=db,
     )
@@ -102,14 +99,14 @@ class TestPopulation:
 
     @pytest.mark.asyncio
     async def test_evolution_trigger(self) -> None:
-        # 4 бота, min_trades=2, ready_ratio=0.5 → нужно 2 бота с ≥2 сделками
-        pop = await _make_pop(size=4, min_trades=2, ready_ratio=0.5)
+        # 4 бота, min_trades=2 → нужно 4*2=8 суммарных сделок
+        pop = await _make_pop(size=4, min_trades=2)
         assert not pop.should_evolve()
-        # Один бот набрал 2 сделки — мало (1/4 < 0.5)
-        pop._bot_trade_counts = {0: 2}
+        # 5 сделок — мало (5 < 8)
+        pop._bot_trade_counts = {0: 3, 1: 2}
         assert not pop.should_evolve()
-        # Два бота набрали 2 сделки — достаточно (2/4 >= 0.5)
-        pop._bot_trade_counts = {0: 2, 1: 2}
+        # 8 сделок — достаточно (неважно как распределены)
+        pop._bot_trade_counts = {0: 7, 1: 1}
         assert pop.should_evolve()
 
     @pytest.mark.asyncio

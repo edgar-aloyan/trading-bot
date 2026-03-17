@@ -56,7 +56,6 @@ class TradingBot:
         evo = raw["evolution"]
         self._pop_size: int = evo["population_size"]
         self._min_trades_per_bot: int = evo["min_trades_per_bot"]
-        self._evolution_ready_ratio: float = evo["evolution_ready_ratio"]
 
         # Эксперименты: список популяций для параллельного тестирования
         self._experiments: list[dict[str, object]] = raw.get(
@@ -84,7 +83,6 @@ class TradingBot:
                 fitness_config=self._fitness_config,
                 genetics_config=self._genetics_config,
                 min_trades_per_bot=self._min_trades_per_bot,
-                evolution_ready_ratio=self._evolution_ready_ratio,
                 filter_config=self._filter_config,
                 db=self._db,
                 population_id=pop_id,

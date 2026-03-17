@@ -12,13 +12,8 @@ market_data:
   max_reconnect_attempts: 10
 
 signals:
-  orderbook_levels: 10  # топ N уровней для imbalance
-  imbalance_threshold: 0.65
-  flow_threshold: 1.5
-  flow_weight: 0.5  # вес flow сигнала относительно imbalance
-  flow_window_seconds: 5
-  eth_window_seconds: 10
-  eth_move_threshold: 0.0003  # 0.03%
+  delta_weight: 0.5  # вес volume delta сигнала относительно micro-price
+  flow_window_seconds: 5  # окно для volume delta
   funding_positive_threshold: 0.0001
   funding_negative_threshold: -0.0001
 
@@ -31,7 +26,6 @@ filters:
 evolution:
   population_size: 200
   min_trades_per_bot: 50       # минимум сделок на бота для оценки fitness
-  evolution_ready_ratio: 0.7071  # 1/√2 — доля ботов, которые должны набрать min_trades
   elite_ratio: 0.3
   crossover_ratio: 0.4
   mutation_ratio: 0.3

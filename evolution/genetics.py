@@ -24,15 +24,15 @@ class ParamRange:
     max_val: float
 
 
-# Диапазоны из SPEC.md — базовые параметры (taker)
+# Диапазоны параметров — базовые (taker)
 PARAM_RANGES: dict[str, ParamRange] = {
-    "imbalance_threshold": ParamRange(0.55, 0.85),
-    "flow_threshold": ParamRange(1.2, 3.0),
+    "micro_price_threshold": ParamRange(0.00001, 0.001),
+    "delta_threshold": ParamRange(0.05, 0.8),
     "take_profit_usd": ParamRange(8.0, 40.0),
     "stop_loss_usd": ParamRange(5.0, 25.0),
     "max_hold_seconds": ParamRange(10.0, 300.0),
-    "eth_move_threshold": ParamRange(0.0001, 0.0005),
-    "leader_weight": ParamRange(0.0, 1.0),
+    "basis_threshold": ParamRange(0.00001, 0.001),
+    "basis_weight": ParamRange(0.0, 1.0),
 }
 
 # Расширенные диапазоны для maker-популяций

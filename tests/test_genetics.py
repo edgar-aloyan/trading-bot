@@ -27,13 +27,13 @@ def _default_config() -> GeneticsConfig:
 
 def _fixed_params() -> BotParams:
     return BotParams(
-        imbalance_threshold=0.65,
-        flow_threshold=1.5,
+        micro_price_threshold=0.0005,
+        delta_threshold=0.4,
         take_profit_usd=20.0,
         stop_loss_usd=10.0,
         max_hold_seconds=60.0,
-        eth_move_threshold=0.0003,
-        leader_weight=0.5,
+        basis_threshold=0.0003,
+        basis_weight=0.5,
     )
 
 
@@ -50,22 +50,22 @@ class TestCrossover:
     def test_blx_alpha_in_range(self) -> None:
         """BLX-alpha crossover всегда в допустимых диапазонах."""
         a = BotParams(
-            imbalance_threshold=0.60,
-            flow_threshold=1.4,
+            micro_price_threshold=0.0002,
+            delta_threshold=0.1,
             take_profit_usd=10.0,
             stop_loss_usd=5.0,
             max_hold_seconds=30.0,
-            eth_move_threshold=0.0002,
-            leader_weight=0.2,
+            basis_threshold=0.0002,
+            basis_weight=0.2,
         )
         b = BotParams(
-            imbalance_threshold=0.80,
-            flow_threshold=2.6,
+            micro_price_threshold=0.0008,
+            delta_threshold=0.7,
             take_profit_usd=30.0,
             stop_loss_usd=15.0,
             max_hold_seconds=90.0,
-            eth_move_threshold=0.0004,
-            leader_weight=0.8,
+            basis_threshold=0.0004,
+            basis_weight=0.8,
         )
         for _ in range(100):
             child = crossover(a, b, alpha=0.5)
@@ -77,30 +77,30 @@ class TestCrossover:
         """BLX-alpha не просто усредняет — даёт разные результаты."""
         a = _fixed_params()
         b = BotParams(
-            imbalance_threshold=0.80,
-            flow_threshold=2.5,
+            micro_price_threshold=0.0008,
+            delta_threshold=0.7,
             take_profit_usd=35.0,
             stop_loss_usd=20.0,
             max_hold_seconds=100.0,
-            eth_move_threshold=0.0004,
-            leader_weight=0.9,
+            basis_threshold=0.0004,
+            basis_weight=0.9,
         )
         children = [crossover(a, b, alpha=0.5) for _ in range(20)]
         # Все дети должны быть разными (стохастичность)
-        unique = {c.imbalance_threshold for c in children}
+        unique = {c.micro_price_threshold for c in children}
         assert len(unique) > 5
 
     def test_alpha_zero_between_parents(self) -> None:
         """При alpha=0 ребёнок всегда между родителями."""
         a = _fixed_params()
         b = BotParams(
-            imbalance_threshold=0.80,
-            flow_threshold=2.5,
+            micro_price_threshold=0.0008,
+            delta_threshold=0.7,
             take_profit_usd=35.0,
             stop_loss_usd=20.0,
             max_hold_seconds=100.0,
-            eth_move_threshold=0.0004,
-            leader_weight=0.9,
+            basis_threshold=0.0004,
+            basis_weight=0.9,
         )
         for _ in range(50):
             child = crossover(a, b, alpha=0.0)

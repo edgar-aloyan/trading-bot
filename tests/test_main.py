@@ -29,7 +29,7 @@ def _make_snapshot(
             bids=[OrderBookLevel(eth_mid - 0.5, 3.0)],
             asks=[OrderBookLevel(eth_mid + 0.5, 3.0)],
         ),
-        btc_perp=TickerInfo(funding_rate=0.0001),
+        btc_perp=TickerInfo(funding_rate=0.0001, last_price=btc_mid),
         recent_trades=[
             Trade(btc_mid, 0.5, "buy", ts - 1),
             Trade(btc_mid, 0.3, "sell", ts - 1),
