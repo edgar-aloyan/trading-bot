@@ -249,9 +249,9 @@ class TestMakerPopulation:
         assert len(pop.last_closed_trades) == 1
 
         trade = pop.last_closed_trades[0]
-        # Maker fee: 1000 * 0.0001 = 0.10
-        expected_maker_fee = 1000.0 * 0.0001
-        assert abs(trade.fees - expected_maker_fee) < 0.01
+        # Round-trip maker fees: entry maker + exit maker = 0.10 + 0.10 = 0.20
+        expected_round_trip = 1000.0 * 0.0001 * 2
+        assert abs(trade.fees - expected_round_trip) < 0.01
 
     @pytest.mark.asyncio
     async def test_maker_sl_exit_uses_taker_fee(self) -> None:
@@ -277,8 +277,10 @@ class TestMakerPopulation:
         assert len(pop.last_closed_trades) == 1
 
         trade = pop.last_closed_trades[0]
-        # Taker fee: 1000 * (0.0006 + slippage)
-        assert trade.fees > 1000.0 * 0.0001  # больше чем maker fee
+        # Round-trip: entry maker ($0.10) + exit taker+slippage (~$0.60) ≈ $0.70
+        # Должно быть больше чем round-trip maker ($0.20)
+        expected_maker_round_trip = 1000.0 * 0.0001 * 2
+        assert trade.fees > expected_maker_round_trip
 
 
 class TestMakerGenetics:

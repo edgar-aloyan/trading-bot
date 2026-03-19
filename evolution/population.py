@@ -454,7 +454,11 @@ class Population:
                 is_maker_tp = True
 
         pnl = engine.close_position(current_price)
-        fees = self._compute_fees(spread, current_price, maker=is_maker_tp)
+        # Round-trip fees: entry + exit
+        entry_maker = self._mode == "maker"
+        entry_fees = self._compute_fees(spread, pos.entry_price, maker=entry_maker)
+        exit_fees = self._compute_fees(spread, current_price, maker=is_maker_tp)
+        fees = entry_fees + exit_fees
         net_pnl = pnl - fees
         self.last_closed_trades.append(ClosedTrade(
             bot_id=bot.bot_id,
