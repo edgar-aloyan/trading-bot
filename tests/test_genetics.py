@@ -27,12 +27,14 @@ def _default_config() -> GeneticsConfig:
 
 def _fixed_params() -> BotParams:
     return BotParams(
-        micro_price_threshold=0.0005,
-        delta_threshold=0.4,
+        micro_sensitivity=0.000005,
+        micro_weight=0.5,
+        delta_sensitivity=0.4,
+        delta_weight=0.5,
         take_profit_usd=20.0,
         stop_loss_usd=10.0,
         max_hold_seconds=60.0,
-        basis_threshold=0.0003,
+        basis_sensitivity=0.001,
         basis_weight=0.5,
     )
 
@@ -50,21 +52,25 @@ class TestCrossover:
     def test_blx_alpha_in_range(self) -> None:
         """BLX-alpha crossover всегда в допустимых диапазонах."""
         a = BotParams(
-            micro_price_threshold=0.0002,
-            delta_threshold=0.1,
+            micro_sensitivity=0.000001,
+            micro_weight=0.2,
+            delta_sensitivity=0.1,
+            delta_weight=0.2,
             take_profit_usd=10.0,
             stop_loss_usd=5.0,
             max_hold_seconds=30.0,
-            basis_threshold=0.0002,
+            basis_sensitivity=0.0002,
             basis_weight=0.2,
         )
         b = BotParams(
-            micro_price_threshold=0.0008,
-            delta_threshold=0.7,
+            micro_sensitivity=0.000008,
+            micro_weight=0.8,
+            delta_sensitivity=0.7,
+            delta_weight=0.8,
             take_profit_usd=30.0,
             stop_loss_usd=15.0,
             max_hold_seconds=90.0,
-            basis_threshold=0.0004,
+            basis_sensitivity=0.004,
             basis_weight=0.8,
         )
         for _ in range(100):
@@ -77,29 +83,33 @@ class TestCrossover:
         """BLX-alpha не просто усредняет — даёт разные результаты."""
         a = _fixed_params()
         b = BotParams(
-            micro_price_threshold=0.0008,
-            delta_threshold=0.7,
+            micro_sensitivity=0.000008,
+            micro_weight=0.9,
+            delta_sensitivity=0.7,
+            delta_weight=0.9,
             take_profit_usd=35.0,
             stop_loss_usd=20.0,
             max_hold_seconds=100.0,
-            basis_threshold=0.0004,
+            basis_sensitivity=0.004,
             basis_weight=0.9,
         )
         children = [crossover(a, b, alpha=0.5) for _ in range(20)]
         # Все дети должны быть разными (стохастичность)
-        unique = {c.micro_price_threshold for c in children}
+        unique = {c.micro_sensitivity for c in children}
         assert len(unique) > 5
 
     def test_alpha_zero_between_parents(self) -> None:
         """При alpha=0 ребёнок всегда между родителями."""
         a = _fixed_params()
         b = BotParams(
-            micro_price_threshold=0.0008,
-            delta_threshold=0.7,
+            micro_sensitivity=0.000008,
+            micro_weight=0.9,
+            delta_sensitivity=0.7,
+            delta_weight=0.9,
             take_profit_usd=35.0,
             stop_loss_usd=20.0,
             max_hold_seconds=100.0,
-            basis_threshold=0.0004,
+            basis_sensitivity=0.004,
             basis_weight=0.9,
         )
         for _ in range(50):

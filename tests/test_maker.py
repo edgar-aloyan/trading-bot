@@ -32,7 +32,6 @@ def _filter_config() -> FilterConfig:
         max_spread_usd=2.0,
         min_volatility=0.0001,
         max_volatility=0.01,
-        delta_weight=0.5,
     )
 
 
@@ -87,13 +86,15 @@ def _neutral_signal_values() -> SignalValues:
 def _maker_bot_params(**overrides: float) -> BotParams:
     """Стандартные параметры maker-бота для тестов."""
     defaults: dict[str, float] = dict(
-        micro_price_threshold=0.0001,
-        delta_threshold=0.1,
+        micro_sensitivity=0.0001,
+        micro_weight=0.5,
+        delta_sensitivity=0.1,
+        delta_weight=0.5,
         take_profit_usd=20.0,
         stop_loss_usd=10.0,
         max_hold_seconds=60.0,
-        basis_threshold=0.0001,
-        basis_weight=0.5,
+        basis_sensitivity=0.001,
+        basis_weight=0.0,
         limit_offset_usd=2.0,
         cancel_timeout_seconds=30.0,
         exit_order_mode=0.0,

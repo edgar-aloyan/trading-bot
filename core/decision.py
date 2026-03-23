@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import yaml
@@ -19,15 +20,23 @@ from core.signals import Signal, SignalValues
 
 @dataclass(slots=True)
 class BotParams:
-    """Параметры одного бота — мутируют при эволюции."""
+    """Параметры одного бота — мутируют при эволюции.
 
-    micro_price_threshold: float  # порог отклонения micro-price (0.00001–0.001)
-    delta_threshold: float  # порог volume delta (0.05–0.8)
+    Scoring: мультипликативный (soft AND).
+    Каждый сигнал нормализуется через tanh(signal / sensitivity) → [-1, 1],
+    затем комбинируется: score = Π(1 + weight_i * confidence_i) - 1.
+    weight=0 → сигнал выключен, weight=1 → полный вклад.
+    """
+
+    micro_sensitivity: float  # масштаб tanh для micro-price (0.0000001–0.00001)
+    micro_weight: float  # вкл/выкл micro-price (0.0–1.0)
+    delta_sensitivity: float  # масштаб tanh для volume delta (0.05–1.0)
+    delta_weight: float  # вкл/выкл volume delta (0.0–1.0)
     take_profit_usd: float  # тейк-профит ($8–$40)
     stop_loss_usd: float  # стоп-лосс ($5–$25)
-    max_hold_seconds: float  # макс. время удержания (10–120)
-    basis_threshold: float  # порог perp-spot basis (0.00001–0.001)
-    basis_weight: float  # вес basis сигнала (0.0–1.0)
+    max_hold_seconds: float  # макс. время удержания (10–300)
+    basis_sensitivity: float  # масштаб tanh для perp-spot basis (0.0001–0.01)
+    basis_weight: float  # вкл/выкл basis (0.0–1.0)
     # Maker order params — defaults encode taker behavior
     limit_offset_usd: float = 0.0  # отступ от цены для лимитной заявки (0 → taker)
     cancel_timeout_seconds: float = 0.0  # таймаут отмены незаполненного ордера
@@ -46,19 +55,16 @@ class FilterConfig:
     max_spread_usd: float
     min_volatility: float
     max_volatility: float
-    delta_weight: float  # вес volume delta сигнала в _compute_score
 
     @staticmethod
     def from_yaml(path: str) -> FilterConfig:
         with open(path) as f:
             raw = yaml.safe_load(f)
         flt = raw["filters"]
-        sig = raw["signals"]
         return FilterConfig(
             max_spread_usd=flt["max_spread_usd"],
             min_volatility=flt["min_volatility"],
             max_volatility=flt["max_volatility"],
-            delta_weight=float(sig["delta_weight"]),
         )
 
 
@@ -160,33 +166,39 @@ class DecisionEngine:
         return values.volatility <= f.max_volatility
 
     def _compute_score(self, values: SignalValues) -> float:
-        """Вычисляет композитный score для направления сделки.
+        """Мультипликативный score — soft AND с soft ON/OFF весами.
 
-        Положительный → LONG, отрицательный → SHORT, ~0 → HOLD.
+        Каждый сигнал нормализуется через tanh → confidence ∈ [-1, 1].
+        Комбинация: score = Π(1 + weight * confidence) - 1.
+
+        Поведение:
+        - weight=0 → множитель=1 → сигнал выключен
+        - Все сигналы согласны → произведение растёт → сильный score
+        - Один сигнал против → множитель <1 → произведение проседает (soft AND)
         """
-        params = self.params
-        score = 0.0
+        p = self.params
 
-        # Micro-price deviation: основной сигнал
-        # Положительное отклонение = покупательское давление → LONG
-        if values.micro_price_deviation > params.micro_price_threshold:
-            score += values.micro_price_deviation - params.micro_price_threshold
-        elif values.micro_price_deviation < -params.micro_price_threshold:
-            score += values.micro_price_deviation + params.micro_price_threshold
+        # Нормализуем каждый сигнал в [-1, 1] через tanh
+        c_micro = (
+            math.tanh(values.micro_price_deviation / p.micro_sensitivity)
+            if p.micro_sensitivity > 0 else 0.0
+        )
+        c_delta = (
+            math.tanh(values.volume_delta / p.delta_sensitivity)
+            if p.delta_sensitivity > 0 else 0.0
+        )
+        c_basis = (
+            math.tanh(values.basis / p.basis_sensitivity)
+            if p.basis_sensitivity > 0 else 0.0
+        )
 
-        # Volume delta: подтверждающий сигнал
-        dw = self.filters.delta_weight
-        if values.volume_delta > params.delta_threshold:
-            score += (values.volume_delta - params.delta_threshold) * dw
-        elif values.volume_delta < -params.delta_threshold:
-            score += (values.volume_delta + params.delta_threshold) * dw
-
-        # Perp-spot basis: sentiment сигнал
-        # Положительный basis (перп дороже спота) = бычий sentiment
-        if abs(values.basis) > params.basis_threshold:
-            score += values.basis * params.basis_weight
-
-        return score
+        # Мультипликативная комбинация
+        return (
+            (1.0 + p.micro_weight * c_micro)
+            * (1.0 + p.delta_weight * c_delta)
+            * (1.0 + p.basis_weight * c_basis)
+            - 1.0
+        )
 
     def _unrealized_pnl(self, current_price: float) -> float:
         """Нереализованный PnL текущей позиции в USD."""

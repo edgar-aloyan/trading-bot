@@ -25,13 +25,16 @@ class ParamRange:
 
 
 # Диапазоны параметров — базовые (taker)
+# sensitivity = масштаб tanh, weight = ON/OFF (мультипликативный score)
 PARAM_RANGES: dict[str, ParamRange] = {
-    "micro_price_threshold": ParamRange(0.00001, 0.001),
-    "delta_threshold": ParamRange(0.05, 0.8),
+    "micro_sensitivity": ParamRange(0.0000001, 0.00001),
+    "micro_weight": ParamRange(0.0, 1.0),
+    "delta_sensitivity": ParamRange(0.05, 1.0),
+    "delta_weight": ParamRange(0.0, 1.0),
     "take_profit_usd": ParamRange(8.0, 40.0),
     "stop_loss_usd": ParamRange(5.0, 25.0),
     "max_hold_seconds": ParamRange(10.0, 300.0),
-    "basis_threshold": ParamRange(0.00001, 0.001),
+    "basis_sensitivity": ParamRange(0.0001, 0.01),
     "basis_weight": ParamRange(0.0, 1.0),
 }
 

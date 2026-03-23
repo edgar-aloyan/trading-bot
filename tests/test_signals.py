@@ -219,7 +219,6 @@ class TestSignalComputer:
         p.write_text(
             """
 signals:
-  delta_weight: 0.5
   flow_window_seconds: 5
   funding_positive_threshold: 0.0001
   funding_negative_threshold: -0.0001

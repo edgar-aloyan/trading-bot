@@ -12,7 +12,6 @@ market_data:
   max_reconnect_attempts: 10
 
 signals:
-  delta_weight: 0.5  # вес volume delta сигнала относительно micro-price
   flow_window_seconds: 5  # окно для volume delta
   funding_positive_threshold: 0.0001
   funding_negative_threshold: -0.0001

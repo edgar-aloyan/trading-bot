@@ -99,8 +99,10 @@ class PendingOrder:
 # ---------------------------------------------------------------------------
 
 TAKER_PARAM_NAMES = (
-    "micro_price_threshold", "delta_threshold", "take_profit_usd",
-    "stop_loss_usd", "max_hold_seconds", "basis_threshold", "basis_weight",
+    "micro_sensitivity", "micro_weight",
+    "delta_sensitivity", "delta_weight",
+    "take_profit_usd", "stop_loss_usd", "max_hold_seconds",
+    "basis_sensitivity", "basis_weight",
 )
 
 MAKER_PARAM_NAMES = TAKER_PARAM_NAMES + (

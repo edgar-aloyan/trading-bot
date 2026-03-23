@@ -11,19 +11,20 @@ def _default_filters() -> FilterConfig:
         max_spread_usd=2.0,
         min_volatility=0.0001,
         max_volatility=0.01,
-        delta_weight=0.5,
     )
 
 
 def _default_params() -> BotParams:
     return BotParams(
-        micro_price_threshold=0.0001,
-        delta_threshold=0.3,
+        micro_sensitivity=0.0001,
+        micro_weight=0.5,
+        delta_sensitivity=0.3,
+        delta_weight=0.5,
         take_profit_usd=20.0,
         stop_loss_usd=10.0,
         max_hold_seconds=60.0,
-        basis_threshold=0.0001,
-        basis_weight=0.5,
+        basis_sensitivity=0.001,
+        basis_weight=0.0,  # basis выключен по умолчанию в тестах
     )
 
 
@@ -53,8 +54,8 @@ class TestEntrySignal:
     def test_strong_buy_pressure_gives_long(self) -> None:
         engine = DecisionEngine(_default_params(), _default_filters())
         values = SignalValues(
-            micro_price_deviation=0.0005,  # выше порога 0.0001
-            volume_delta=0.6,  # выше порога 0.3
+            micro_price_deviation=0.0005,  # tanh(0.0005/0.0001) ≈ 1.0
+            volume_delta=0.6,  # tanh(0.6/0.3) ≈ 0.96
             basis=0.0,
             funding_rate=0.0,
             spread=1.0,
@@ -66,8 +67,8 @@ class TestEntrySignal:
     def test_strong_sell_pressure_gives_short(self) -> None:
         engine = DecisionEngine(_default_params(), _default_filters())
         values = SignalValues(
-            micro_price_deviation=-0.0005,  # ниже -0.0001
-            volume_delta=-0.6,  # ниже -0.3
+            micro_price_deviation=-0.0005,  # tanh(-5) ≈ -1.0
+            volume_delta=-0.6,  # tanh(-2) ≈ -0.96
             basis=0.0,
             funding_rate=0.0,
             spread=1.0,
@@ -75,6 +76,85 @@ class TestEntrySignal:
         )
         signal = engine.compute_entry_signal(values, 67000.0, 1000.0)
         assert signal == Signal.SHORT
+
+    def test_conflicting_signals_penalized(self) -> None:
+        """Soft AND: micro LONG + delta SHORT → не LONG (сигналы конфликтуют)."""
+        engine = DecisionEngine(_default_params(), _default_filters())
+        values = SignalValues(
+            micro_price_deviation=0.0005,  # сильный LONG
+            volume_delta=-0.6,  # сильный SHORT — конфликт
+            basis=0.0,
+            funding_rate=0.0,
+            spread=1.0,
+            volatility=0.001,
+        )
+        signal = engine.compute_entry_signal(values, 67000.0, 1000.0)
+        # Конфликтующие сигналы дают SHORT (delta против), не LONG
+        assert signal == Signal.SHORT
+
+    def test_weight_zero_disables_signal(self) -> None:
+        """Weight=0 полностью выключает сигнал."""
+        params = BotParams(
+            micro_sensitivity=0.0001,
+            micro_weight=0.0,  # micro выключен
+            delta_sensitivity=0.3,
+            delta_weight=0.5,
+            take_profit_usd=20.0,
+            stop_loss_usd=10.0,
+            max_hold_seconds=60.0,
+            basis_sensitivity=0.001,
+            basis_weight=0.0,
+        )
+        engine = DecisionEngine(params, _default_filters())
+        # Micro LONG, delta SHORT — но micro выключен, только delta решает
+        values = SignalValues(
+            micro_price_deviation=0.0005,
+            volume_delta=-0.6,
+            basis=0.0,
+            funding_rate=0.0,
+            spread=1.0,
+            volatility=0.001,
+        )
+        signal = engine.compute_entry_signal(values, 67000.0, 1000.0)
+        assert signal == Signal.SHORT
+
+    def test_all_signals_agree_strong_score(self) -> None:
+        """Все три сигнала согласны → сильнее чем два."""
+        params = BotParams(
+            micro_sensitivity=0.0001,
+            micro_weight=0.5,
+            delta_sensitivity=0.3,
+            delta_weight=0.5,
+            take_profit_usd=20.0,
+            stop_loss_usd=10.0,
+            max_hold_seconds=60.0,
+            basis_sensitivity=0.001,
+            basis_weight=0.5,  # basis включён
+        )
+        engine = DecisionEngine(params, _default_filters())
+        # Все три LONG
+        values_3 = SignalValues(
+            micro_price_deviation=0.0005,
+            volume_delta=0.6,
+            basis=0.005,  # positive basis = бычий
+            funding_rate=0.0,
+            spread=1.0,
+            volatility=0.001,
+        )
+        score_3 = engine._compute_score(values_3)
+        # Два сигнала LONG, basis нейтральный
+        values_2 = SignalValues(
+            micro_price_deviation=0.0005,
+            volume_delta=0.6,
+            basis=0.0,
+            funding_rate=0.0,
+            spread=1.0,
+            volatility=0.001,
+        )
+        score_2 = engine._compute_score(values_2)
+        assert score_3 > score_2 > 0
+        # Количественно: три согласных сигнала дают заметно больший score
+        assert score_3 > score_2 * 1.2
 
 
 # ---------------------------------------------------------------------------
