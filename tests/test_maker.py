@@ -163,8 +163,8 @@ class TestMakerPopulation:
         assert len(pop.last_pending_orders) == 1
         assert len(pop.last_opened_positions) == 0
 
-        # Tick 2: цена 67010 — выше лимита, не fill
-        pop.process_signals(_neutral_signal_values(), 67010.0, 1.0, 1001.0)
+        # Tick 2: цена чуть выше лимита — не fill, не trail
+        pop.process_signals(_neutral_signal_values(), 66999.0, 1.0, 1001.0)
         assert bot.pending_order is not None
         assert len(pop.last_opened_positions) == 0
 
@@ -191,8 +191,8 @@ class TestMakerPopulation:
         assert bot.pending_order.side == "SHORT"
         assert bot.pending_order.limit_price == 67003.0
 
-        # Tick 2: цена ниже лимита — не fill
-        pop.process_signals(_neutral_signal_values(), 66990.0, 1.0, 1001.0)
+        # Tick 2: цена чуть ниже лимита — не fill, не trail
+        pop.process_signals(_neutral_signal_values(), 67002.0, 1.0, 1001.0)
         assert bot.pending_order is not None
 
         # Tick 3: цена поднимается до 67003 — fill!
@@ -226,6 +226,63 @@ class TestMakerPopulation:
         assert bot.pending_order is None
         assert len(pop.last_removed_order_ids) == 1
         assert bot.engine.position is None  # позиция не открылась
+
+    @pytest.mark.asyncio
+    async def test_trailing_long_raises_limit(self) -> None:
+        """Trailing: цена растёт → limit buy поднимается за ней."""
+        pop = await _make_maker_pop(size=1)
+        bot = pop.bots[0]
+        bot.params = _maker_bot_params(
+            limit_offset_usd=2.0, cancel_timeout_seconds=60.0,
+        )
+        bot.engine.params = bot.params
+
+        # Tick 1: LONG → pending buy at 66998
+        pop.process_signals(_long_signal_values(), 67000.0, 1.0, 1000.0)
+        assert bot.pending_order is not None
+        assert bot.pending_order.limit_price == 66998.0
+
+        # Tick 2: цена выросла до 67050 → limit поднимается до 67048
+        pop.process_signals(_neutral_signal_values(), 67050.0, 1.0, 1001.0)
+        assert bot.pending_order is not None
+        assert bot.pending_order.limit_price == 67048.0
+
+        # Tick 3: цена чуть выше лимита → НЕ опускается (trail только вверх)
+        pop.process_signals(_neutral_signal_values(), 67049.0, 1.0, 1002.0)
+        assert bot.pending_order is not None
+        assert bot.pending_order.limit_price == 67048.0  # не изменился
+
+        # Tick 4: цена падает до 67048 → fill на pullback!
+        pop.process_signals(_neutral_signal_values(), 67048.0, 1.0, 1003.0)
+        assert bot.pending_order is None
+        assert bot.engine.position is not None
+        assert bot.engine.position.entry_price == 67048.0
+
+    @pytest.mark.asyncio
+    async def test_trailing_short_lowers_limit(self) -> None:
+        """Trailing: цена падает → limit sell опускается за ней."""
+        pop = await _make_maker_pop(size=1)
+        bot = pop.bots[0]
+        bot.params = _maker_bot_params(
+            limit_offset_usd=3.0, cancel_timeout_seconds=60.0,
+        )
+        bot.engine.params = bot.params
+
+        # Tick 1: SHORT → pending sell at 67003
+        pop.process_signals(_short_signal_values(), 67000.0, 1.0, 1000.0)
+        assert bot.pending_order is not None
+        assert bot.pending_order.limit_price == 67003.0
+
+        # Tick 2: цена упала до 66950 → limit опускается до 66953
+        pop.process_signals(_neutral_signal_values(), 66950.0, 1.0, 1001.0)
+        assert bot.pending_order is not None
+        assert bot.pending_order.limit_price == 66953.0
+
+        # Tick 3: цена поднимается до 66953 → fill!
+        pop.process_signals(_neutral_signal_values(), 66953.0, 1.0, 1002.0)
+        assert bot.pending_order is None
+        assert bot.engine.position is not None
+        assert bot.engine.position.entry_price == 66953.0
 
     @pytest.mark.asyncio
     async def test_maker_tp_exit_uses_maker_fee(self) -> None:

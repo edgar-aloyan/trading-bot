@@ -398,7 +398,7 @@ class Population:
     def _process_pending_order(
         self, bot: Bot, current_price: float, now: float,
     ) -> Signal:
-        """Проверяет fill или timeout для pending order."""
+        """Проверяет fill, trail или timeout для pending order."""
         order = bot.pending_order
         assert order is not None
 
@@ -432,6 +432,34 @@ class Population:
         if now - order.placed_time >= bot.params.cancel_timeout_seconds:
             bot.pending_order = None
             self.last_removed_order_ids.append(bot.bot_id)
+            return Signal.HOLD
+
+        # Trailing: перетаскиваем лимит за ценой если цена ушла в сторону сигнала.
+        # LONG: цена растёт → поднимаем limit buy (ловим pullback, а не breakdown)
+        # SHORT: цена падает → опускаем limit sell
+        offset = bot.params.limit_offset_usd
+        if order.side == "LONG":
+            new_limit = current_price - offset
+            if new_limit > order.limit_price:
+                bot.pending_order = PendingOrder(
+                    bot_id=order.bot_id,
+                    side=order.side,
+                    limit_price=new_limit,
+                    placed_time=order.placed_time,
+                    size_usd=order.size_usd,
+                    signals=order.signals,
+                )
+        else:
+            new_limit = current_price + offset
+            if new_limit < order.limit_price:
+                bot.pending_order = PendingOrder(
+                    bot_id=order.bot_id,
+                    side=order.side,
+                    limit_price=new_limit,
+                    placed_time=order.placed_time,
+                    size_usd=order.size_usd,
+                    signals=order.signals,
+                )
 
         return Signal.HOLD
 
