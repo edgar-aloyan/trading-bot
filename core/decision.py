@@ -37,6 +37,8 @@ class BotParams:
     max_hold_seconds: float  # макс. время удержания (10–300)
     basis_sensitivity: float  # масштаб tanh для perp-spot basis (0.0001–0.01)
     basis_weight: float  # вкл/выкл basis (0.0–1.0)
+    funding_sensitivity: float  # масштаб tanh для funding rate (0.00001–0.001)
+    funding_weight: float  # вкл/выкл funding rate (0.0–1.0)
     # Maker order params — defaults encode taker behavior
     limit_offset_usd: float = 0.0  # отступ от цены для лимитной заявки (0 → taker)
     cancel_timeout_seconds: float = 0.0  # таймаут отмены незаполненного ордера
@@ -191,12 +193,17 @@ class DecisionEngine:
             math.tanh(values.basis / p.basis_sensitivity)
             if p.basis_sensitivity > 0 else 0.0
         )
+        c_funding = (
+            math.tanh(values.funding_rate / p.funding_sensitivity)
+            if p.funding_sensitivity > 0 else 0.0
+        )
 
         # Мультипликативная комбинация
         return (
             (1.0 + p.micro_weight * c_micro)
             * (1.0 + p.delta_weight * c_delta)
             * (1.0 + p.basis_weight * c_basis)
+            * (1.0 + p.funding_weight * c_funding)
             - 1.0
         )
 

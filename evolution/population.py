@@ -103,6 +103,7 @@ TAKER_PARAM_NAMES = (
     "delta_sensitivity", "delta_weight",
     "take_profit_usd", "stop_loss_usd", "max_hold_seconds",
     "basis_sensitivity", "basis_weight",
+    "funding_sensitivity", "funding_weight",
 )
 
 MAKER_PARAM_NAMES = TAKER_PARAM_NAMES + (

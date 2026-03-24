@@ -25,6 +25,8 @@ def _default_params() -> BotParams:
         max_hold_seconds=60.0,
         basis_sensitivity=0.001,
         basis_weight=0.0,  # basis выключен по умолчанию в тестах
+        funding_sensitivity=0.0001,
+        funding_weight=0.0,  # funding выключен по умолчанию в тестах
     )
 
 
@@ -104,6 +106,8 @@ class TestEntrySignal:
             max_hold_seconds=60.0,
             basis_sensitivity=0.001,
             basis_weight=0.0,
+            funding_sensitivity=0.0001,
+            funding_weight=0.0,
         )
         engine = DecisionEngine(params, _default_filters())
         # Micro LONG, delta SHORT — но micro выключен, только delta решает
@@ -130,6 +134,8 @@ class TestEntrySignal:
             max_hold_seconds=60.0,
             basis_sensitivity=0.001,
             basis_weight=0.5,  # basis включён
+            funding_sensitivity=0.0001,
+            funding_weight=0.0,
         )
         engine = DecisionEngine(params, _default_filters())
         # Все три LONG

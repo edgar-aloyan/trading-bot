@@ -36,6 +36,8 @@ def _fixed_params() -> BotParams:
         max_hold_seconds=60.0,
         basis_sensitivity=0.001,
         basis_weight=0.5,
+        funding_sensitivity=0.0001,
+        funding_weight=0.5,
     )
 
 
@@ -61,6 +63,8 @@ class TestCrossover:
             max_hold_seconds=30.0,
             basis_sensitivity=0.0002,
             basis_weight=0.2,
+            funding_sensitivity=0.00005,
+            funding_weight=0.2,
         )
         b = BotParams(
             micro_sensitivity=0.000008,
@@ -72,6 +76,8 @@ class TestCrossover:
             max_hold_seconds=90.0,
             basis_sensitivity=0.004,
             basis_weight=0.8,
+            funding_sensitivity=0.0005,
+            funding_weight=0.8,
         )
         for _ in range(100):
             child = crossover(a, b, alpha=0.5)
@@ -92,6 +98,8 @@ class TestCrossover:
             max_hold_seconds=100.0,
             basis_sensitivity=0.004,
             basis_weight=0.9,
+            funding_sensitivity=0.0005,
+            funding_weight=0.9,
         )
         children = [crossover(a, b, alpha=0.5) for _ in range(20)]
         # Все дети должны быть разными (стохастичность)
@@ -111,6 +119,8 @@ class TestCrossover:
             max_hold_seconds=100.0,
             basis_sensitivity=0.004,
             basis_weight=0.9,
+            funding_sensitivity=0.0005,
+            funding_weight=0.9,
         )
         for _ in range(50):
             child = crossover(a, b, alpha=0.0)
