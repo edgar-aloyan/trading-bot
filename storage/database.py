@@ -277,6 +277,9 @@ class StateDBProtocol(Protocol):
         *,
         population_id: int = 1,
     ) -> None: ...
+    async def load_hall_of_fame(
+        self, limit: int, *, population_id: int = 1,
+    ) -> list[tuple[float, dict[str, object]]]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +691,24 @@ class StateDB:
                 "WHERE id = $3",
                 generation, total_trades, population_id,
             )
+
+    # ---- hall of fame ----
+
+    async def load_hall_of_fame(
+        self, limit: int, *, population_id: int = 1,
+    ) -> list[tuple[float, dict[str, object]]]:
+        """Top-N лучших ботов из истории эволюции по fitness."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT best_fitness, best_params FROM evolutions "
+                "WHERE population_id = $1 AND best_params IS NOT NULL "
+                "ORDER BY best_fitness DESC LIMIT $2",
+                population_id, limit,
+            )
+            return [
+                (float(row["best_fitness"]), _from_json(row["best_params"]))
+                for row in rows
+            ]
 
     # ---- balance (computed) ----
 

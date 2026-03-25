@@ -22,6 +22,8 @@ def _default_config() -> GeneticsConfig:
         mutation_strength=0.1,
         crossover_alpha=0.5,
         tournament_size=3,
+        hall_of_fame_ratio=0.0,
+        hall_of_fame_size=0,
     )
 
 
@@ -153,6 +155,8 @@ class TestMutate:
             mutation_strength=0.5,  # сильная мутация
             crossover_alpha=0.5,
             tournament_size=3,
+            hall_of_fame_ratio=0.0,
+            hall_of_fame_size=0,
         )
         params = _fixed_params()
         for _ in range(100):
@@ -171,6 +175,8 @@ class TestMutate:
             mutation_strength=0.5,
             crossover_alpha=0.5,
             tournament_size=3,
+            hall_of_fame_ratio=0.0,
+            hall_of_fame_size=0,
         )
         params = _fixed_params()
         mutated = mutate(params, config)

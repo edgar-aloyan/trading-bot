@@ -286,9 +286,13 @@ class Population:
                 records, self._paper_config.position_size_usd, self._fitness_config,
             ))
 
+        # Hall of fame: лучшие боты из истории эволюции
+        hall_of_fame = await self._load_hall_of_fame()
+
         params_list = [bot.params for bot in self.bots]
         new_params = evolve(
             params_list, scores, self._genetics_config, self._param_ranges,
+            hall_of_fame=hall_of_fame,
         )
 
         best_idx = scores.index(max(scores)) if scores else 0
@@ -602,6 +606,27 @@ class Population:
                 generation=row.generation,
             ))
         return bots
+
+    async def _load_hall_of_fame(
+        self,
+    ) -> list[tuple[float, BotParams]] | None:
+        """Загружает hall of fame из DB и конвертирует в BotParams."""
+        cfg = self._genetics_config
+        if cfg.hall_of_fame_ratio <= 0 or cfg.hall_of_fame_size <= 0:
+            return None
+        raw_entries = await self._db.load_hall_of_fame(
+            cfg.hall_of_fame_size, population_id=self._population_id,
+        )
+        if not raw_entries:
+            return None
+        result: list[tuple[float, BotParams]] = []
+        for fitness, raw_params in raw_entries:
+            params = BotParams(**{
+                k: float(str(raw_params[k])) if k in raw_params else 0.0
+                for k in self._param_names
+            })
+            result.append((fitness, params))
+        return result
 
     async def _save_bots_to_db(self) -> None:
         await self._db.save_bots([

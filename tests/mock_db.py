@@ -211,3 +211,17 @@ class MockStateDB:
         self._positions[population_id].clear()
         self._pending_orders[population_id].clear()
         self._generations[population_id] = (generation, total_trades)
+
+    async def load_hall_of_fame(
+        self, limit: int, *, population_id: int = 1,
+    ) -> list[tuple[float, dict[str, object]]]:
+        """Top-N лучших ботов из истории эволюции по fitness."""
+        self._ensure_pop(population_id)
+        entries: list[tuple[float, dict[str, object]]] = []
+        for e in self._evolutions[population_id]:
+            bp = e.get("best_params")
+            if bp is not None and isinstance(bp, dict):
+                fit = e["best_fitness"]
+                entries.append((float(str(fit)), dict(bp)))
+        entries.sort(key=lambda x: x[0], reverse=True)
+        return entries[:limit]

@@ -32,6 +32,8 @@ evolution:
   mutation_strength: 0.1
   crossover_alpha: 0.5         # BLX-alpha: 0 = uniform, 0.5 = exploration за пределы родителей
   tournament_size: 3           # число участников tournament selection
+  hall_of_fame_ratio: 0.2      # доля crossover партнёров из hall of fame
+  hall_of_fame_size: 20        # сколько лучших записей из истории загружать
 
 fitness:
   min_trades_for_full_fitness: 50  # ниже — fitness снижается пропорционально

@@ -69,6 +69,8 @@ class GeneticsConfig:
     mutation_strength: float
     crossover_alpha: float
     tournament_size: int
+    hall_of_fame_ratio: float  # доля crossover партнёров из hall of fame
+    hall_of_fame_size: int  # сколько лучших записей загружать
 
     @staticmethod
     def from_yaml(path: str) -> GeneticsConfig:
@@ -83,6 +85,8 @@ class GeneticsConfig:
             mutation_strength=evo["mutation_strength"],
             crossover_alpha=evo["crossover_alpha"],
             tournament_size=evo["tournament_size"],
+            hall_of_fame_ratio=evo.get("hall_of_fame_ratio", 0.0),
+            hall_of_fame_size=evo.get("hall_of_fame_size", 20),
         )
 
 
@@ -151,12 +155,14 @@ def evolve(
     fitness_scores: list[float],
     config: GeneticsConfig,
     param_ranges: dict[str, ParamRange] | None = None,
+    hall_of_fame: list[tuple[float, BotParams]] | None = None,
 ) -> list[BotParams]:
     """Один цикл эволюции:
 
     1. Сортировать по fitness
     2. Топ elite_ratio — выживают без изменений
     3. crossover_ratio — потомки от tournament-selected родителей (BLX-alpha)
+       Часть партнёров берётся из hall of fame (лучшие боты прошлых поколений)
     4. Остаток — заменяются случайными (diversity injection)
     """
     n = len(population)
@@ -179,9 +185,14 @@ def evolve(
         new_population.append(params)
 
     # Скрещивание — tournament selection из всей популяции
+    use_hall = bool(hall_of_fame) and config.hall_of_fame_ratio > 0
     for _ in range(n_crossover):
         parent_a = _tournament_select(ranked, config.tournament_size)
-        parent_b = _tournament_select(ranked, config.tournament_size)
+        if use_hall and random.random() < config.hall_of_fame_ratio:
+            assert hall_of_fame is not None
+            parent_b = _tournament_select(hall_of_fame, config.tournament_size)
+        else:
+            parent_b = _tournament_select(ranked, config.tournament_size)
         child = crossover(parent_a, parent_b, config.crossover_alpha, param_ranges)
         child = mutate(child, config, param_ranges)
         new_population.append(child)
