@@ -97,6 +97,8 @@ def _maker_bot_params(**overrides: float) -> BotParams:
         basis_weight=0.0,
         funding_sensitivity=0.0001,
         funding_weight=0.0,
+        micro_mode=1.0, delta_mode=1.0,
+        basis_mode=1.0, funding_mode=1.0,
         limit_offset_usd=2.0,
         cancel_timeout_seconds=30.0,
         exit_order_mode=0.0,

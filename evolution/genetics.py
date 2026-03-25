@@ -38,6 +38,10 @@ PARAM_RANGES: dict[str, ParamRange] = {
     "basis_weight": ParamRange(0.0, 1.0),
     "funding_sensitivity": ParamRange(0.00001, 0.001),
     "funding_weight": ParamRange(0.0, 1.0),
+    "micro_mode": ParamRange(0.0, 1.0),
+    "delta_mode": ParamRange(0.0, 1.0),
+    "basis_mode": ParamRange(0.0, 1.0),
+    "funding_mode": ParamRange(0.0, 1.0),
 }
 
 # Расширенные диапазоны для maker-популяций

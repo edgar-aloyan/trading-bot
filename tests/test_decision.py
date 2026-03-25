@@ -24,9 +24,13 @@ def _default_params() -> BotParams:
         stop_loss_usd=10.0,
         max_hold_seconds=60.0,
         basis_sensitivity=0.001,
-        basis_weight=0.0,  # basis выключен по умолчанию в тестах
+        basis_weight=0.0,
         funding_sensitivity=0.0001,
-        funding_weight=0.0,  # funding выключен по умолчанию в тестах
+        funding_weight=0.0,
+        micro_mode=1.0,  # AND по умолчанию (как было)
+        delta_mode=1.0,
+        basis_mode=1.0,
+        funding_mode=1.0,
     )
 
 
@@ -108,6 +112,8 @@ class TestEntrySignal:
             basis_weight=0.0,
             funding_sensitivity=0.0001,
             funding_weight=0.0,
+            micro_mode=1.0, delta_mode=1.0,
+            basis_mode=1.0, funding_mode=1.0,
         )
         engine = DecisionEngine(params, _default_filters())
         # Micro LONG, delta SHORT — но micro выключен, только delta решает
@@ -133,9 +139,11 @@ class TestEntrySignal:
             stop_loss_usd=10.0,
             max_hold_seconds=60.0,
             basis_sensitivity=0.001,
-            basis_weight=0.5,  # basis включён
+            basis_weight=0.5,
             funding_sensitivity=0.0001,
             funding_weight=0.0,
+            micro_mode=1.0, delta_mode=1.0,
+            basis_mode=1.0, funding_mode=1.0,
         )
         engine = DecisionEngine(params, _default_filters())
         # Все три LONG
@@ -161,6 +169,61 @@ class TestEntrySignal:
         assert score_3 > score_2 > 0
         # Количественно: три согласных сигнала дают заметно больший score
         assert score_3 > score_2 * 1.2
+
+    def test_or_mode_no_veto(self) -> None:
+        """OR mode: конфликтующий сигнал не ветирует, а вычитает."""
+        # micro=LONG (AND), delta=SHORT (OR) — delta не ветирует
+        params_or = BotParams(
+            micro_sensitivity=0.0001,
+            micro_weight=0.5,
+            delta_sensitivity=0.3,
+            delta_weight=0.5,
+            take_profit_usd=20.0,
+            stop_loss_usd=10.0,
+            max_hold_seconds=60.0,
+            basis_sensitivity=0.001,
+            basis_weight=0.0,
+            funding_sensitivity=0.0001,
+            funding_weight=0.0,
+            micro_mode=1.0,  # AND
+            delta_mode=0.0,  # OR — не ветирует
+            basis_mode=0.0,
+            funding_mode=0.0,
+        )
+        # micro=LONG (AND), delta=SHORT (AND) — delta ветирует
+        params_and = BotParams(
+            micro_sensitivity=0.0001,
+            micro_weight=0.5,
+            delta_sensitivity=0.3,
+            delta_weight=0.5,
+            take_profit_usd=20.0,
+            stop_loss_usd=10.0,
+            max_hold_seconds=60.0,
+            basis_sensitivity=0.001,
+            basis_weight=0.0,
+            funding_sensitivity=0.0001,
+            funding_weight=0.0,
+            micro_mode=1.0,  # AND
+            delta_mode=1.0,  # AND — ветирует
+            basis_mode=0.0,
+            funding_mode=0.0,
+        )
+        values = SignalValues(
+            micro_price_deviation=0.0005,  # LONG
+            volume_delta=-0.6,  # SHORT — конфликт
+            basis=0.0,
+            funding_rate=0.0,
+            spread=1.0,
+            volatility=0.001,
+        )
+        engine_or = DecisionEngine(params_or, _default_filters())
+        engine_and = DecisionEngine(params_and, _default_filters())
+        score_or = engine_or._compute_score(values)
+        score_and = engine_and._compute_score(values)
+        # OR mode: delta вычитает, но micro LONG доминирует → score > 0
+        assert score_or > 0
+        # AND mode: delta ветирует → score < 0
+        assert score_and < 0
 
 
 # ---------------------------------------------------------------------------

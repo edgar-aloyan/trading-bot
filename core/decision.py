@@ -39,6 +39,10 @@ class BotParams:
     basis_weight: float  # вкл/выкл basis (0.0–1.0)
     funding_sensitivity: float  # масштаб tanh для funding rate (0.00001–0.001)
     funding_weight: float  # вкл/выкл funding rate (0.0–1.0)
+    micro_mode: float  # OR(0) ↔ AND(1) для micro-price
+    delta_mode: float  # OR(0) ↔ AND(1) для volume delta
+    basis_mode: float  # OR(0) ↔ AND(1) для basis
+    funding_mode: float  # OR(0) ↔ AND(1) для funding rate
     # Maker order params — defaults encode taker behavior
     limit_offset_usd: float = 0.0  # отступ от цены для лимитной заявки (0 → taker)
     cancel_timeout_seconds: float = 0.0  # таймаут отмены незаполненного ордера
@@ -168,44 +172,63 @@ class DecisionEngine:
         return values.volatility <= f.max_volatility
 
     def _compute_score(self, values: SignalValues) -> float:
-        """Мультипликативный score — soft AND с soft ON/OFF весами.
+        """Hybrid AND/OR score — каждый сигнал выбирает свою логику.
 
-        Каждый сигнал нормализуется через tanh → confidence ∈ [-1, 1].
-        Комбинация: score = Π(1 + weight * confidence) - 1.
+        Каждый сигнал имеет три оси:
+        - sensitivity: масштаб tanh → confidence ∈ [-1, 1]
+        - weight [0,1]: OFF ↔ ON
+        - mode [0,1]: OR ↔ AND
 
-        Поведение:
-        - weight=0 → множитель=1 → сигнал выключен
-        - Все сигналы согласны → произведение растёт → сильный score
-        - Один сигнал против → множитель <1 → произведение проседает (soft AND)
+        AND-часть (mode→1): входит в произведение, может заветировать.
+        OR-часть (mode→0): входит в сумму, может подтолкнуть, но не заветировать.
+
+        score = (Π(1 + w*m*c) - 1) + Σ(w*(1-m)*c)
         """
         p = self.params
 
         # Нормализуем каждый сигнал в [-1, 1] через tanh
-        c_micro = (
-            math.tanh(values.micro_price_deviation / p.micro_sensitivity)
-            if p.micro_sensitivity > 0 else 0.0
-        )
-        c_delta = (
-            math.tanh(values.volume_delta / p.delta_sensitivity)
-            if p.delta_sensitivity > 0 else 0.0
-        )
-        c_basis = (
-            math.tanh(values.basis / p.basis_sensitivity)
-            if p.basis_sensitivity > 0 else 0.0
-        )
-        c_funding = (
-            math.tanh(values.funding_rate / p.funding_sensitivity)
-            if p.funding_sensitivity > 0 else 0.0
-        )
+        signals = [
+            (
+                (
+                    math.tanh(values.micro_price_deviation / p.micro_sensitivity)
+                    if p.micro_sensitivity > 0 else 0.0
+                ),
+                p.micro_weight, p.micro_mode,
+            ),
+            (
+                (
+                    math.tanh(values.volume_delta / p.delta_sensitivity)
+                    if p.delta_sensitivity > 0 else 0.0
+                ),
+                p.delta_weight, p.delta_mode,
+            ),
+            (
+                (
+                    math.tanh(values.basis / p.basis_sensitivity)
+                    if p.basis_sensitivity > 0 else 0.0
+                ),
+                p.basis_weight, p.basis_mode,
+            ),
+            (
+                (
+                    math.tanh(values.funding_rate / p.funding_sensitivity)
+                    if p.funding_sensitivity > 0 else 0.0
+                ),
+                p.funding_weight, p.funding_mode,
+            ),
+        ]
 
-        # Мультипликативная комбинация
-        return (
-            (1.0 + p.micro_weight * c_micro)
-            * (1.0 + p.delta_weight * c_delta)
-            * (1.0 + p.basis_weight * c_basis)
-            * (1.0 + p.funding_weight * c_funding)
-            - 1.0
-        )
+        # AND-часть: произведение (veto power)
+        and_product = 1.0
+        for c, w, m in signals:
+            and_product *= 1.0 + w * m * c
+
+        # OR-часть: сумма (boost without veto)
+        or_sum = 0.0
+        for c, w, m in signals:
+            or_sum += w * (1.0 - m) * c
+
+        return (and_product - 1.0) + or_sum
 
     def _unrealized_pnl(self, current_price: float) -> float:
         """Нереализованный PnL текущей позиции в USD."""
