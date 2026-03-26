@@ -214,13 +214,15 @@ class MockStateDB:
 
     async def load_hall_of_fame(
         self, limit: int, *, population_id: int = 1,
+        min_generation: int = 0,
     ) -> list[tuple[float, dict[str, object]]]:
         """Top-N лучших ботов из истории эволюции по fitness."""
         self._ensure_pop(population_id)
         entries: list[tuple[float, dict[str, object]]] = []
         for e in self._evolutions[population_id]:
             bp = e.get("best_params")
-            if bp is not None and isinstance(bp, dict):
+            gen = int(str(e.get("generation", 0)))
+            if bp is not None and isinstance(bp, dict) and gen >= min_generation:
                 fit = e["best_fitness"]
                 entries.append((float(str(fit)), dict(bp)))
         entries.sort(key=lambda x: x[0], reverse=True)

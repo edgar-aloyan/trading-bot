@@ -610,12 +610,19 @@ class Population:
     async def _load_hall_of_fame(
         self,
     ) -> list[tuple[float, BotParams]] | None:
-        """Загружает hall of fame из DB и конвертирует в BotParams."""
+        """Загружает hall of fame из DB и конвертирует в BotParams.
+
+        Берём только записи от текущей архитектуры (gen >= текущий - размер окна),
+        чтобы не отравлять crossover записями с несовместимыми params и раздутым fitness.
+        """
         cfg = self._genetics_config
         if cfg.hall_of_fame_ratio <= 0 or cfg.hall_of_fame_size <= 0:
             return None
+        # Окно: последние N поколений (hall_of_fame_size как размер окна)
+        min_gen = max(0, self._generation - cfg.hall_of_fame_size)
         raw_entries = await self._db.load_hall_of_fame(
             cfg.hall_of_fame_size, population_id=self._population_id,
+            min_generation=min_gen,
         )
         if not raw_entries:
             return None
