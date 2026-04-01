@@ -32,8 +32,8 @@ class BotParams:
     micro_weight: float  # вкл/выкл micro-price (0.0–1.0)
     delta_sensitivity: float  # масштаб tanh для volume delta (0.05–1.0)
     delta_weight: float  # вкл/выкл volume delta (0.0–1.0)
-    take_profit_usd: float  # тейк-профит ($8–$40)
-    stop_loss_usd: float  # стоп-лосс ($5–$25)
+    take_profit_pct: float  # тейк-профит как % от позиции (0.0005–0.01)
+    stop_loss_pct: float  # стоп-лосс как % от позиции (0.0005–0.01)
     max_hold_seconds: float  # макс. время удержания (10–300)
     basis_sensitivity: float  # масштаб tanh для perp-spot basis (0.0001–0.01)
     basis_weight: float  # вкл/выкл basis (0.0–1.0)
@@ -127,13 +127,15 @@ class DecisionEngine:
             return False
 
         pnl = self._unrealized_pnl(current_price)
+        # Нормализуем PnL к % от позиции — масштабируется с ценой и размером
+        pnl_pct = pnl / self.position.size_usd if self.position.size_usd > 0 else 0.0
 
         # Take profit
-        if pnl >= self.params.take_profit_usd:
+        if pnl_pct >= self.params.take_profit_pct:
             return True
 
         # Stop loss
-        if pnl <= -self.params.stop_loss_usd:
+        if pnl_pct <= -self.params.stop_loss_pct:
             return True
 
         # Timeout — checked each tick, so resolution depends on WebSocket frequency

@@ -92,8 +92,8 @@ def _maker_bot_params(**overrides: float) -> BotParams:
         micro_weight=0.5,
         delta_sensitivity=0.1,
         delta_weight=0.5,
-        take_profit_usd=20.0,
-        stop_loss_usd=10.0,
+        take_profit_pct=0.002,
+        stop_loss_pct=0.001,
         max_hold_seconds=60.0,
         basis_sensitivity=0.001,
         basis_weight=0.0,
@@ -306,8 +306,9 @@ class TestMakerPopulation:
         pop.process_signals(_neutral_signal_values(), 66998.0, 1.0, 1001.0)
         assert bot.engine.position is not None
 
-        # Tick 3: TP hit — price up enough для take_profit_usd=20
-        tp_price = 66998.0 + 20.0 * (66998.0 / 1000.0)
+        # Tick 3: TP hit — price up enough для take_profit_pct=0.002 (0.2%)
+        # PnL >= 0.2% * $1000 = $2. price_move = $2 / (1000/66998) = $134
+        tp_price = 66998.0 + 0.002 * 66998.0
         pop.process_signals(_neutral_signal_values(), tp_price + 1, 1.0, 1010.0)
         assert bot.engine.position is None
         assert len(pop.last_closed_trades) == 1
@@ -334,8 +335,8 @@ class TestMakerPopulation:
         pop.process_signals(_neutral_signal_values(), 66998.0, 1.0, 1001.0)
         assert bot.engine.position is not None
 
-        # Tick 3: SL hit — price drops
-        sl_price = 66998.0 - 10.0 * (66998.0 / 1000.0)
+        # Tick 3: SL hit — price drops enough for stop_loss_pct=0.001 (0.1%)
+        sl_price = 66998.0 - 0.001 * 66998.0
         pop.process_signals(_neutral_signal_values(), sl_price - 1, 1.0, 1010.0)
         assert bot.engine.position is None
         assert len(pop.last_closed_trades) == 1

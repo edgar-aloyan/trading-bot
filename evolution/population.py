@@ -101,7 +101,7 @@ class PendingOrder:
 TAKER_PARAM_NAMES = (
     "micro_sensitivity", "micro_weight",
     "delta_sensitivity", "delta_weight",
-    "take_profit_usd", "stop_loss_usd", "max_hold_seconds",
+    "take_profit_pct", "stop_loss_pct", "max_hold_seconds",
     "basis_sensitivity", "basis_weight",
     "funding_sensitivity", "funding_weight",
     "micro_mode", "delta_mode", "basis_mode", "funding_mode",
@@ -483,10 +483,14 @@ class Population:
 
         # Определяем тип выхода для расчёта fees
         is_maker_tp = False
-        if self._mode == "maker" and bot.params.exit_order_mode > 0.5:
-            # TP exit с maker fee — если PnL достигает take_profit
+        if (
+            self._mode == "maker"
+            and bot.params.exit_order_mode > 0.5
+            and pos.size_usd > 0
+        ):
+            # TP exit с maker fee — если PnL% достигает take_profit_pct
             unrealized = engine._unrealized_pnl(current_price)
-            if unrealized >= bot.params.take_profit_usd:
+            if unrealized / pos.size_usd >= bot.params.take_profit_pct:
                 is_maker_tp = True
 
         pnl = engine.close_position(current_price)

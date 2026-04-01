@@ -20,8 +20,8 @@ def _default_params() -> BotParams:
         micro_weight=0.5,
         delta_sensitivity=0.3,
         delta_weight=0.5,
-        take_profit_usd=20.0,
-        stop_loss_usd=10.0,
+        take_profit_pct=0.002,
+        stop_loss_pct=0.001,
         max_hold_seconds=60.0,
         basis_sensitivity=0.001,
         basis_weight=0.0,
@@ -105,8 +105,8 @@ class TestEntrySignal:
             micro_weight=0.0,  # micro выключен
             delta_sensitivity=0.3,
             delta_weight=0.5,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
+            take_profit_pct=0.002,
+            stop_loss_pct=0.001,
             max_hold_seconds=60.0,
             basis_sensitivity=0.001,
             basis_weight=0.0,
@@ -135,8 +135,8 @@ class TestEntrySignal:
             micro_weight=0.5,
             delta_sensitivity=0.3,
             delta_weight=0.5,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
+            take_profit_pct=0.002,
+            stop_loss_pct=0.001,
             max_hold_seconds=60.0,
             basis_sensitivity=0.001,
             basis_weight=0.5,
@@ -178,8 +178,8 @@ class TestEntrySignal:
             micro_weight=0.5,
             delta_sensitivity=0.3,
             delta_weight=0.5,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
+            take_profit_pct=0.002,
+            stop_loss_pct=0.001,
             max_hold_seconds=60.0,
             basis_sensitivity=0.001,
             basis_weight=0.0,
@@ -196,8 +196,8 @@ class TestEntrySignal:
             micro_weight=0.5,
             delta_sensitivity=0.3,
             delta_weight=0.5,
-            take_profit_usd=20.0,
-            stop_loss_usd=10.0,
+            take_profit_pct=0.002,
+            stop_loss_pct=0.001,
             max_hold_seconds=60.0,
             basis_sensitivity=0.001,
             basis_weight=0.0,
@@ -268,16 +268,16 @@ class TestExitConditions:
         engine = DecisionEngine(_default_params(), _default_filters())
         engine.open_position(Signal.LONG, 67000.0, 1000.0, 10000.0)
 
-        # TP = $20, size = $10000 → нужен рост ~$134 (20 / (10000/67000))
-        assert not engine.should_exit(67100.0, 1010.0)  # +$14.9, не достигнут
-        assert engine.should_exit(67200.0, 1010.0)  # +$29.8, достигнут
+        # TP = 0.2%, size = $10000 → PnL >= $20 → рост ~$134
+        assert not engine.should_exit(67100.0, 1010.0)  # +0.149%, не достигнут
+        assert engine.should_exit(67200.0, 1010.0)  # +0.299%, достигнут
 
     def test_stop_loss_long(self) -> None:
         engine = DecisionEngine(_default_params(), _default_filters())
         engine.open_position(Signal.LONG, 67000.0, 1000.0, 10000.0)
 
-        # SL = $10, цена упала
-        assert engine.should_exit(66930.0, 1010.0)  # -$10.4
+        # SL = 0.1%, цена упала на $70 → -0.104%
+        assert engine.should_exit(66930.0, 1010.0)
 
     def test_timeout(self) -> None:
         engine = DecisionEngine(_default_params(), _default_filters())
