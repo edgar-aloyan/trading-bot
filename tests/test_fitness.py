@@ -69,9 +69,11 @@ class TestComputeMetrics:
 
 
 class TestComputeFitness:
-    def test_empty_trades(self) -> None:
+    def test_empty_trades_penalized(self) -> None:
+        """Бот без сделок получает штрафной fitness (хуже чем средний торгующий)."""
         score = compute_fitness([], POSITION_SIZE, _default_config())
-        assert score == 0.0
+        assert score < 0
+        assert score == -0.002
 
     def test_all_wins_positive(self) -> None:
         """Бот с прибыльными сделками имеет положительный fitness."""

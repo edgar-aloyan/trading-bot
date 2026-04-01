@@ -115,7 +115,10 @@ def compute_fitness(
     - не требует весов, caps, normalization
     """
     if not trades:
-        return 0.0
+        # Бот не торговал — штрафной fitness чтобы GA не конвергировал на HOLD.
+        # Значение хуже чем у типичного торгующего бота (avg ~-0.0008),
+        # чтобы GA всегда предпочитал хотя бы попытку торговать.
+        return -0.002
 
     log_returns = [math.log(1.0 + t.pnl / position_size) for t in trades]
     raw_fitness = sum(log_returns) / len(log_returns)

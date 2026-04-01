@@ -222,8 +222,8 @@ class MockStateDB:
         for e in self._evolutions[population_id]:
             bp = e.get("best_params")
             gen = int(str(e.get("generation", 0)))
-            if bp is not None and isinstance(bp, dict) and gen >= min_generation:
-                fit = e["best_fitness"]
-                entries.append((float(str(fit)), dict(bp)))
+            fit = float(str(e.get("best_fitness", 0)))
+            if bp is not None and isinstance(bp, dict) and gen >= min_generation and fit != 0.0:
+                entries.append((fit, dict(bp)))
         entries.sort(key=lambda x: x[0], reverse=True)
         return entries[:limit]
